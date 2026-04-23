@@ -49,7 +49,7 @@ export default function App() {
             <Route path="/inventory" element={<Protected allowed={['mart_admin', 'manager', 'stock_manager']}><Inventory /></Protected>} />
 
             {/* Staff — mart_admin only */}
-            <Route path="/staff" element={<Protected allowed={['mart_admin']}><Staff /></Protected>} />
+            <Route path="/staff" element={<Protected allowed={['mart_admin', 'manager']}><Staff /></Protected>} />
             <Route path="/drivers" element={<Protected allowed={['mart_admin', 'manager', 'dispatcher']}><Drivers /></Protected>} />
 
             {/* Reports — mart_admin, manager, accountant */}

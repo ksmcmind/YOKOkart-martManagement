@@ -1,20 +1,21 @@
 // src/api/index.js
+// Change BASE_URL if backend runs on different port
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api'
 
 export const getToken = () => localStorage.getItem('ksmcm_mart_token') || ''
-export const getUser = () => JSON.parse(localStorage.getItem('ksmcm_mart_user') || 'null')
-export const getMartId = () => getUser()?.mongoMartId || ''
-export const getRole = () => getUser()?.role || ''
 
 const request = async (method, path, body = null) => {
+    const isFormData = body instanceof FormData
+
     const options = {
         method,
         headers: {
-            'Content-Type': 'application/json',
+            ...(!isFormData && { 'Content-Type': 'application/json' }),
             'Authorization': `Bearer ${getToken()}`,
         },
     }
-    if (body) options.body = JSON.stringify(body)
+
+    if (body) options.body = isFormData ? body : JSON.stringify(body)
 
     const res = await fetch(`${BASE_URL}${path}`, options)
     const data = await res.json()

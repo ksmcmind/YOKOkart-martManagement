@@ -50,15 +50,15 @@ export default function Drivers() {
                 </div>
             )
         },
-        { key: 'vehicle', label: 'Vehicle', render: r => `${r.vehicle_type} · ${r.vehicle_number || '—'}` },
+        { key: 'vehicle', label: 'Vehicle', render: r => `${r.vehicleType} · ${r.vehicleNumber || '—'}` },
         { key: 'status', label: 'Status', render: r => <Badge variant={statusColor[r.status] || 'gray'}>{r.status || 'offline'}</Badge> },
-        { key: 'total_deliveries', label: 'Deliveries', render: r => r.total_deliveries || 0 },
-        { key: 'total_earnings', label: 'Earnings', render: r => `₹${r.total_earnings || 0}` },
+        { key: 'total_deliveries', label: 'Deliveries', render: r => r.totalDeliveries || 0 },
+        { key: 'total_earnings', label: 'Earnings', render: r => `₹${r.totalEarnings || 0}` },  
         {
             key: 'documents', label: 'Docs', render: r => (
                 <div className="flex gap-2">
-                    {r.licence_image && <a href={r.licence_image} target="_blank" rel="noreferrer" className="text-xs text-primary-600 hover:underline">Licence</a>}
-                    {r.pan_image && <a href={r.pan_image} target="_blank" rel="noreferrer" className="text-xs text-primary-600 hover:underline">PAN</a>}
+                    {r.licenceImage && <a href={r.licenceImage} target="_blank" rel="noreferrer" className="text-xs text-primary-600 hover:underline">Licence</a>}
+                    {r.panImage && <a href={r.panImage} target="_blank" rel="noreferrer" className="text-xs text-primary-600 hover:underline">PAN</a>}
                     {r.aadhaar_image && <a href={r.aadhaar_image} target="_blank" rel="noreferrer" className="text-xs text-primary-600 hover:underline">Aadhaar</a>}
                 </div>
             )

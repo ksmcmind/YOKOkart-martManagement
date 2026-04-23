@@ -9,7 +9,7 @@ export default function useAuth() {
 
     const role = user?.role || ''
     const martId = user?.mongoMartId || '' // always from JWT — never from dropdown
-
+    console.log('martId:', user)
     // Role checks
     const is = {
         martAdmin: role === 'mart_admin',
