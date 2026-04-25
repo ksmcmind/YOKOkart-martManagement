@@ -31,16 +31,16 @@ export const verifyOtp = createAsyncThunk('auth/verifyOtp', async ({ phone, otp 
     if (!res.success) return rejectWithValue(res.message)
 
     const user = res.data.user
-    if (user.role === 'super_admin')       return rejectWithValue('Use Super Admin panel')
-    if (!MART_ROLES.includes(user.role))   return rejectWithValue('Access denied. Mart staff only.')
-    if (!user.mongoMartId)                 return rejectWithValue('No mart assigned. Contact admin.')
+    if (user.role === 'super_admin') return rejectWithValue('Use Super Admin panel')
+    if (!MART_ROLES.includes(user.role)) return rejectWithValue('Access denied. Mart staff only.')
+    if (!user.martId) return rejectWithValue('No mart assigned. Contact admin.')
 
     localStorage.setItem(KEY, JSON.stringify(user))
     return res.data
 })
 
 export const logout = createAsyncThunk('auth/logout', async () => {
-    try { await api.post('/auth/logout') } catch {}
+    try { await api.post('/auth/logout') } catch { }
     localStorage.removeItem(KEY)
 })
 
@@ -65,15 +65,15 @@ const authSlice = createSlice({
         },
     },
     extraReducers: (b) => {
-        b.addCase(sendOtp.pending,   (s) => { s.loading = true; s.error = null })
-         .addCase(sendOtp.fulfilled, (s) => { s.loading = false; s.otpSent = true })
-         .addCase(sendOtp.rejected,  (s, a) => { s.loading = false; s.error = a.payload })
+        b.addCase(sendOtp.pending, (s) => { s.loading = true; s.error = null })
+            .addCase(sendOtp.fulfilled, (s) => { s.loading = false; s.otpSent = true })
+            .addCase(sendOtp.rejected, (s, a) => { s.loading = false; s.error = a.payload })
 
-         .addCase(verifyOtp.pending,   (s) => { s.loading = true; s.error = null })
-         .addCase(verifyOtp.fulfilled, (s, a) => { s.loading = false; s.user = a.payload.user; s.isLoggedIn = true })
-         .addCase(verifyOtp.rejected,  (s, a) => { s.loading = false; s.error = a.payload })
+            .addCase(verifyOtp.pending, (s) => { s.loading = true; s.error = null })
+            .addCase(verifyOtp.fulfilled, (s, a) => { s.loading = false; s.user = a.payload.user; s.isLoggedIn = true })
+            .addCase(verifyOtp.rejected, (s, a) => { s.loading = false; s.error = a.payload })
 
-         .addCase(logout.fulfilled, (s) => { s.user = null; s.isLoggedIn = false; s.otpSent = false })
+            .addCase(logout.fulfilled, (s) => { s.user = null; s.isLoggedIn = false; s.otpSent = false })
     },
 })
 
@@ -82,8 +82,8 @@ export default authSlice.reducer
 
 // One selector. Destructure what you need.
 export const selectAuth = (s) => s.auth
-export const selectUser         = (s) => s.auth.user
-export const selectIsLoggedIn   = (s) => s.auth.isLoggedIn
-export const selectAuthLoading  = (s) => s.auth.loading
-export const selectAuthError    = (s) => s.auth.error
-export const selectOtpSent      = (s) => s.auth.otpSent
+export const selectUser = (s) => s.auth.user
+export const selectIsLoggedIn = (s) => s.auth.isLoggedIn
+export const selectAuthLoading = (s) => s.auth.loading
+export const selectAuthError = (s) => s.auth.error
+export const selectOtpSent = (s) => s.auth.otpSent
