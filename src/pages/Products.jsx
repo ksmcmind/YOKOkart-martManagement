@@ -1,8 +1,3 @@
-// src/pages/Products.jsx
-// View-only product catalog — mart staff can browse products from the global catalog.
-// Editing/creating products is done in the super-admin panel.
-// Uses the same Grid + Badge components as Inventory.
-
 import { useEffect, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import { fetchProducts, selectAllProducts, selectProductLoading } from '../store/slices/productSlice'
@@ -11,6 +6,13 @@ import Grid from '../components/Grid'
 import Badge from '../components/Badge'
 import useAuth from '../hooks/useAuth'
 import api from '../api/index'
+
+// --- FIX 1: Create a simple Select component or import your UI library's select ---
+const Select = ({ children, ...props }) => (
+    <select {...props} className="text-xs border border-gray-300 rounded px-2 py-1 bg-white focus:ring-1 focus:ring-primary-500 outline-none">
+        {children}
+    </select>
+)
 
 export default function Products() {
     const dispatch = useDispatch()
@@ -22,6 +24,10 @@ export default function Products() {
     const [catId, setCatId] = useState('')
     const [search, setSearch] = useState('')
 
+    // --- FIX 2: Define the missing state variables used in the bottom filters ---
+    const [categorySlug, setCategorySlug] = useState('')
+    const [subcategorySlug, setSubcategorySlug] = useState('')
+
     useEffect(() => {
         if (!martId) return
         api.get('/categories').then(r => setCategories(r.data || []))
@@ -31,53 +37,40 @@ export default function Products() {
         if (martId && catId) dispatch(fetchProducts({ martId, categoryId: catId }))
     }, [martId, catId, dispatch])
 
-    // ── Grid columns (view-only — no edit/add) ──────────────────────────────
+    // --- FIX 3: Define handleEdit (even if it just logs for now) ---
+    const handleEdit = (product) => {
+        console.log("Edit clicked for:", product)
+    }
+
     const columns = [
         {
             key: 'name', label: 'Product', render: r => (
-                <div className="flex items-center gap-3 py-1">
-                    {r.images?.[0] || r.image ? (
-                        <img src={r.images?.[0] || r.image} className="w-10 h-10 rounded-lg object-cover border border-gray-100" alt="" />
-                    ) : (
-                        <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center text-gray-400 text-lg">📦</div>
-                    )}
-                    <div>
-                        <p className="font-bold text-gray-900 leading-tight">{r.name}</p>
-                        <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">{r.brand} · {r.displayUnit || r.display_unit || ''}</p>
-                    </div>
+                <div className="py-1">
+                    <p className="font-bold text-gray-900 leading-tight">{r.name}</p>
+                    <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">{r.brand}</p>
                 </div>
             ),
         },
+        { key: 'productId', label: 'Product ID', render: r => <span className="text-[11px] font-mono font-bold bg-gray-50 px-2 py-1 rounded border border-gray-100 text-gray-700">{r.productId || '—'}</span> },
+        { key: 'category', label: 'Category', render: r => <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tight">{r.categorySlug} › {r.subcategorySlug || '—'}</span> },
         {
-            key: 'price', label: 'Price', render: r => (
-                <span className="text-[11px] font-bold text-gray-700">₹{r.price ?? r.sale_price ?? '—'}</span>
-            ),
+            key: 'tax', label: 'Taxation', render: r => (
+                <div className="text-[10px] leading-tight">
+                    <p className="font-bold text-gray-700">HSN: {r.hsnCode || '—'}</p>
+                    <p className="text-primary-600 font-bold">{r.gstPercentage}% GST</p>
+                </div>
+            )
         },
+        { key: 'status', label: 'Status', render: r => <Badge variant={r.isActive ? 'green' : 'red'} size="sm">{r.isActive ? 'Active' : 'Inactive'}</Badge> },
         {
-            key: 'stock', label: 'Stock', render: r => {
-                const qty = r.stockQty ?? r.stock_qty ?? 0
-                return (
-                    <span className={`text-[11px] font-bold ${qty <= 10 ? 'text-red-600' : 'text-gray-900'}`}>
-                        {qty}
-                    </span>
-                )
-            },
-        },
-        {
-            key: 'status', label: 'Status', render: r => (
-                <Badge variant={(r.inStock ?? r.in_stock) ? 'green' : 'red'}>
-                    {(r.inStock ?? r.in_stock) ? 'Active' : 'Inactive'}
-                </Badge>
-            ),
-        },
-        {
-            key: 'barcode', label: 'Barcode / PLU', render: r => (
-                <span className="text-[10px] font-mono text-gray-500">{r.barcode || r.pluCode || r.plu_code || '—'}</span>
-            ),
+            key: 'actions', label: '', render: r => (
+                <div className="flex gap-3 justify-end pr-4">
+                    <button onClick={(e) => { e.stopPropagation(); handleEdit(r) }} className="text-[10px] text-primary-600 font-bold hover:underline">EDIT</button>
+                </div>
+            )
         },
     ]
 
-    // ── Expanded row — show variant details ─────────────────────────────────
     const renderExpanded = (r) => (
         <div className="overflow-hidden rounded-lg border border-gray-100 bg-white shadow-sm">
             {r.variants?.length > 0 ? (
@@ -117,7 +110,6 @@ export default function Products() {
         </div>
     )
 
-    // Filter products by search locally
     const filteredProducts = search
         ? products.filter(p =>
             p.name?.toLowerCase().includes(search.toLowerCase()) ||
@@ -133,17 +125,18 @@ export default function Products() {
                 subtitle="View product catalog (managed by super admin)"
             />
 
-            {/* Category filter chips */}
             <div className="flex gap-2 flex-wrap">
                 {categories.map(c => (
                     <button
                         key={c._id || c.id}
-                        onClick={() => setCatId(c._id || c.id)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                            catId === (c._id || c.id)
-                                ? 'bg-primary-500 text-white shadow-sm'
-                                : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
-                        }`}
+                        onClick={() => {
+                            setCatId(c._id || c.id);
+                            setCategorySlug(c.slug); // Sync slug for the dropdowns
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${catId === (c._id || c.id)
+                            ? 'bg-primary-500 text-white shadow-sm'
+                            : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
+                            }`}
                     >
                         {c.icon || c.emoji || ''} {c.name}
                     </button>
@@ -158,14 +151,32 @@ export default function Products() {
             ) : (
                 <Grid
                     columns={columns}
-                    data={filteredProducts}
+                    data={filteredProducts} // --- FIX 4: Uncommented and used filteredProducts ---
                     loading={loading}
-                    emptyText="No products in this category"
                     externalSearchValue={search}
                     onSearchChange={setSearch}
-                    searchPlaceholder="Search by name, brand, barcode..."
                     renderExpanded={renderExpanded}
-                    pageSize={15}
+                    actions={
+                        <div className="flex gap-2">
+                            <Select value={categorySlug} onChange={e => {
+                                const selected = categories.find(c => c.slug === e.target.value);
+                                setCategorySlug(e.target.value);
+                                setCatId(selected?._id || selected?.id || '');
+                                setSubcategorySlug('');
+                            }}>
+                                <option value="">All Categories</option>
+                                {categories.map(c => <option key={c.slug} value={c.slug}>{c.name}</option>)}
+                            </Select>
+                            {categorySlug && (
+                                <Select value={subcategorySlug} onChange={e => setSubcategorySlug(e.target.value)}>
+                                    <option value="">All Subcategories</option>
+                                    {categories.find(c => c.slug === categorySlug)?.subcategories?.map(s => (
+                                        <option key={s.slug} value={s.slug}>{s.name}</option>
+                                    ))}
+                                </Select>
+                            )}
+                        </div>
+                    }
                 />
             )}
         </div>

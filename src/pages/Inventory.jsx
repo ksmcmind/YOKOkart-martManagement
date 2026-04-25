@@ -166,7 +166,7 @@ function StockBadge({ qty, alert }) {
 
 export default function Inventory() {
     const dispatch = useDispatch()
-     const { martId, staffId, isLoggedIn, isInitialized, user } = useAuth()
+    const { martId, staffId, isLoggedIn, isInitialized, user } = useAuth()
 
     // ── LOG 1: What does useAuth actually give us?
     console.log('🅰️ [Inventory] useAuth returns:', {
@@ -192,10 +192,10 @@ export default function Inventory() {
     const filtered = useSelector(s => selectFilteredInventory(s, search))
 
     useEffect(() => {
-    if (martId) {
-        dispatch(fetchInventory(martId))
-    }
-}, [martId, dispatch])
+        if (martId) {
+            dispatch(fetchInventory(martId))
+        }
+    }, [martId, dispatch])
 
     const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
@@ -248,94 +248,138 @@ export default function Inventory() {
     // ── Grid columns ────────────────────────────────────────────────────────
     const columns = [
         {
-            key: 'product', label: 'Product', render: r => (
-                <div className="py-1">
-                    <p className="font-bold text-gray-900 leading-tight text-[11px] font-mono">
-                        …{r.product_id?.slice(-12)}
-                    </p>
-                    <p className="text-[10px] text-gray-400 font-medium">{r.variant_id}</p>
-                </div>
-            ),
-        },
-        {
-            key: 'pricing', label: 'Pricing', render: r => (
-                <div className="text-[10px] leading-tight space-y-0.5">
-                    <div className="flex gap-1 items-baseline">
-                        <span className="text-gray-400">Sale:</span>
-                        <EditableCell value={r.sale_price} type="number"
-                            onSave={v => handleInlineUpdate(r.id, 'sale_price', v)} />
-                    </div>
-                    <div className="flex gap-1 items-baseline">
-                        <span className="text-gray-400">MRP:</span>
-                        <EditableCell value={r.mrp} type="number"
-                            onSave={v => handleInlineUpdate(r.id, 'mrp', v)} />
-                    </div>
-                </div>
-            ),
-        },
-        {
-            key: 'stock', label: 'Stock', render: r => (
-                <div className="text-[10px] leading-tight space-y-0.5">
-                    <div className="flex gap-1 items-baseline">
-                        <EditableCell value={r.stock_qty} type="number"
-                            onSave={v => handleInlineUpdate(r.id, 'stock_qty', v)} />
-                        <EditableCell value={r.stock_unit} options={UNITS}
-                            onSave={v => handleInlineUpdate(r.id, 'stock_unit', v)} />
-                    </div>
-                    <div className="flex gap-1 items-baseline text-gray-400">
-                        <span>Alert:</span>
-                        <EditableCell value={r.low_stock_alert} type="number"
-                            onSave={v => handleInlineUpdate(r.id, 'low_stock_alert', v)} />
-                    </div>
-                </div>
-            ),
-        },
-        {
-            key: 'status', label: 'Status', render: r => (
-                <StockBadge qty={r.stock_qty} alert={r.low_stock_alert} />
-            ),
-        },
-        {
-            key: 'details', label: 'Details', render: r => (
-                <div className="text-[10px] leading-tight space-y-0.5">
-                    <div className="flex gap-1">
-                        <span className="text-gray-400">Expiry:</span>
-                        <EditableCell value={r.expiry_date?.slice(0, 10) || ''} type="date"
-                            onSave={v => handleInlineUpdate(r.id, 'expiry_date', v)} />
-                    </div>
-                    <div className="flex gap-1">
-                        <span className="text-gray-400">Batch:</span>
-                        <EditableCell value={r.batch_number || ''}
-                            onSave={v => handleInlineUpdate(r.id, 'batch_number', v)} />
-                    </div>
-                    <div className="flex gap-1">
-                        <span className="text-gray-400">Aisle:</span>
-                        <EditableCell value={r.aisle_location || ''}
-                            onSave={v => handleInlineUpdate(r.id, 'aisle_location', v)} />
-                    </div>
-                </div>
-            ),
-        },
-        {
-            key: 'active', label: 'Active', render: r => (
-                <button onClick={(e) => { e.stopPropagation(); dispatch(toggleInventoryActive(r)) }}
-                    className={`w-9 h-5 rounded-full transition-colors ${r.is_active ? 'bg-green-400' : 'bg-gray-200'}`}>
-                    <span className={`block w-3.5 h-3.5 rounded-full bg-white shadow transition-transform mx-0.5 ${r.is_active ? 'translate-x-4' : 'translate-x-0'}`} />
-                </button>
-            ),
-        },
-        {
-            key: 'actions', label: '', render: r => (
-                <div className="flex gap-3 justify-end pr-4">
-                    <button onClick={(e) => {
-                        e.stopPropagation()
-                        if (confirm('Delete this inventory item?')) dispatch(deleteInventoryItem(r.id))
-                    }} className="text-[10px] text-red-500 font-bold hover:underline">DELETE</button>
-                </div>
-            ),
-        },
-    ]
+            key: 'product',
+            label: 'Product ID',
+            render: r => (
+                <div className="flex items-center gap-2 py-1">
+                    <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border border-gray-200">
+                        #{r.mongo_product_id}
+                    </span>
 
+                </div>
+            ),
+        },
+        {
+            key: 'variant',
+            label: 'Variant',
+            render: r => (
+                <div className="py-1">
+                    <Badge variant="blue" size="xs" className="font-bold tracking-wide">
+                        {r.variant_id}
+                    </Badge>
+                </div>
+            ),
+        },
+        {
+            key: 'pricing',
+            label: 'Pricing',
+            render: r => (
+                <div className="flex items-center gap-3 text-[11px]">
+                    <div className="flex items-center gap-1">
+                        <span className="text-gray-400 font-bold text-[9px] uppercase">Sale:</span>
+                        <span className="font-bold text-primary-600 flex items-center">
+                            ₹<EditableCell value={r.sale_price} type="number" onSave={v => handleInlineUpdate(r.id, 'sale_price', v)} />
+                        </span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                        <span className="text-gray-400 font-bold text-[9px] uppercase">MRP:</span>
+                        <span className="text-gray-400 line-through">
+                            <EditableCell value={r.mrp} type="number" onSave={v => handleInlineUpdate(r.id, 'mrp', v)} />
+                        </span>
+                    </div>
+                </div>
+            ),
+        },
+        {
+            key: 'stock',
+            label: 'Inventory',
+            render: r => {
+                const isLow = parseFloat(r.stock_qty) <= parseFloat(r.low_stock_alert);
+                return (
+                    <div className="flex items-center gap-3 text-[11px]">
+                        <div className="flex items-center gap-1">
+                            <span className="text-gray-400 font-bold text-[9px] uppercase">Qty:</span>
+                            <div className={`flex items-center font-bold ${isLow ? 'text-red-600' : 'text-gray-800'}`}>
+                                <EditableCell value={r.stock_qty} type="number" onSave={v => handleInlineUpdate(r.id, 'stock_qty', v)} />
+                                <span className="ml-0.5 text-[9px] uppercase">{r.stock_unit}</span>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                            <span className="text-gray-400 font-bold text-[9px] uppercase">Alert:</span>
+                            <EditableCell className="text-gray-500" value={r.low_stock_alert} type="number" onSave={v => handleInlineUpdate(r.id, 'low_stock_alert', v)} />
+                        </div>
+                    </div>
+                );
+            },
+        },
+        {
+            key: 'location',
+            label: 'Logistics',
+            render: r => (
+                <div className="flex items-center gap-3 text-[10px]">
+                    <div className="flex items-center gap-1">
+                        <span className="text-gray-400 font-bold text-[9px] uppercase">Batch:</span>
+                        <EditableCell className="font-mono text-gray-700" value={r.batch_number || '—'} onSave={v => handleInlineUpdate(r.id, 'batch_number', v)} />
+                    </div>
+                    <div className="flex items-center gap-1">
+                        <span className="text-gray-400 font-bold text-[9px] uppercase">Aisle:</span>
+                        <EditableCell className="text-gray-700" value={r.aisle_location || '—'} onSave={v => handleInlineUpdate(r.id, 'aisle_location', v)} />
+                    </div>
+                </div>
+            )
+        },
+        {
+            key: 'expiry_restock',
+            label: 'Dates',
+            render: r => (
+                <div className="flex items-center gap-3 text-[10px]">
+                    <div className="flex items-center gap-1">
+                        <span className="text-gray-400 font-bold text-[9px] uppercase">Exp:</span>
+                        <EditableCell
+                            className={`font-bold px-1 py-0.5 rounded ${!r.expiry_date ? 'text-gray-300 underline decoration-dotted' : 'text-red-600 bg-red-50'}`}
+                            value={r.expiry_date?.slice(0, 10) || 'SET'}
+                            type="date"
+                            onSave={v => handleInlineUpdate(r.id, 'expiry_date', v)}
+                        />
+                    </div>
+                    <div className="flex items-center gap-1">
+                        <span className="text-gray-400 font-bold text-[9px] uppercase">In:</span>
+                        <span className="text-gray-600 font-medium">
+                            {r.last_restocked_at ? new Date(r.last_restocked_at).toLocaleDateString('en-GB') : '—'}
+                        </span>
+                    </div>
+                </div>
+            )
+        },
+        {
+            key: 'status',
+            label: 'Active',
+            render: r => (
+                <div className="flex items-center justify-center">
+                    <button
+                        onClick={(e) => { e.stopPropagation(); dispatch(toggleInventoryActive(r)) }}
+                        className={`w-7 h-4 rounded-full transition-all duration-200 relative ${r.is_active ? 'bg-green-500 shadow-sm' : 'bg-gray-300'}`}
+                    >
+                        <span className={`absolute top-0.5 left-0.5 block w-3 h-3 rounded-full bg-white transition-transform duration-200 ${r.is_active ? 'translate-x-3' : 'translate-x-0'}`} />
+                    </button>
+                </div>
+            ),
+        },
+        {
+            key: 'actions',
+            label: '',
+            render: r => (
+                <div className="flex justify-end pr-2">
+                    <button
+                        onClick={(e) => { e.stopPropagation(); handleEdit(r) }}
+                        className="text-[10px] text-primary-600 font-black hover:bg-primary-50 px-2 py-1 rounded transition-colors uppercase tracking-tighter"
+                    >
+                        Edit
+                    </button>
+                </div>
+            )
+        }
+    ];
     // ── Expanded row detail ──────────────────────────────────────────────────
     const renderExpanded = (r) => (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
@@ -403,10 +447,10 @@ export default function Inventory() {
                 data={filtered}
                 loading={loading}
                 emptyText="No inventory items yet. Add one or bulk upload CSV."
-                externalSearchValue={search}
+                // externalSearchValue={search}
                 onSearchChange={setSearch}
                 searchPlaceholder="Search by product ID, variant, aisle..."
-                renderExpanded={renderExpanded}
+                // renderExpanded={renderExpanded}
                 pageSize={15}
             />
 
@@ -490,7 +534,7 @@ export default function Inventory() {
                     const action = await dispatch(bulkUploadInventory({
                         file,
                         martId: resolvedMartId,
-                        staffId:staffId,
+                        staffId: staffId,
                     }))
                     return action.payload
                 }}
