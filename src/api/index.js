@@ -1,28 +1,41 @@
 // src/api/index.js
-// Change BASE_URL if backend runs on different port
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api'
 
-export const getToken = () => localStorage.getItem('ksmcm_mart_token') || ''
+// Ensure this key matches exactly what you see in your Browser's Application tab
+export const getToken = () => localStorage.getItem('ksmcm_token') || ''
 
 const request = async (method, path, body = null) => {
     const isFormData = body instanceof FormData
+    const token = getToken(); // <--- 1. CALL THE FUNCTION
 
     const options = {
         method,
+        credentials: 'include', 
         headers: {
             ...(!isFormData && { 'Content-Type': 'application/json' }),
-            'Authorization': `Bearer ${getToken()}`,
+            'X-Client-Type': 'web',
+            // 2. ADD THE AUTHORIZATION HEADER MANUALLY
+            ...(token && { 'Authorization': `Bearer ${token}` }), 
         },
     }
 
     if (body) options.body = isFormData ? body : JSON.stringify(body)
 
     const res = await fetch(`${BASE_URL}${path}`, options)
-    const data = await res.json()
+    
+    // Safety check: if response is not JSON (like a 500 error page), res.json() will crash
+    let data;
+    try {
+        data = await res.json()
+    } catch (e) {
+        data = { success: false, message: 'Invalid server response' }
+    }
 
     if (res.status === 401) {
+        // We commented out the redirect, so the app won't refresh anymore!
+        // But we still clear the storage because the token is invalid.
         localStorage.clear()
-        window.location.href = '/'
+        console.error("Session expired or Token missing");
     }
 
     return data

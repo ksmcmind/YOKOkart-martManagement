@@ -7,7 +7,7 @@ import staffReducer from './slices/staffSlice'
 import categoryReducer from './slices/categorySlice'
 import productReducer from './slices/productSlice'
 import orderReducer from './slices/orderSlice'
-
+import inventoryReducer from './slices/inventorySlice'
 const store = configureStore({
     reducer: {
         auth: authReducer,
@@ -17,6 +17,7 @@ const store = configureStore({
         category: categoryReducer,
         product: productReducer,
         order: orderReducer,
+        inventory: inventoryReducer,
     },
 })
 
