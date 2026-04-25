@@ -62,13 +62,13 @@ export default function Products() {
             )
         },
         { key: 'status', label: 'Status', render: r => <Badge variant={r.isActive ? 'green' : 'red'} size="sm">{r.isActive ? 'Active' : 'Inactive'}</Badge> },
-        {
-            key: 'actions', label: '', render: r => (
-                <div className="flex gap-3 justify-end pr-4">
-                    <button onClick={(e) => { e.stopPropagation(); handleEdit(r) }} className="text-[10px] text-primary-600 font-bold hover:underline">EDIT</button>
-                </div>
-            )
-        },
+        // {
+        //     key: 'actions', label: '', render: r => (
+        //         <div className="flex gap-3 justify-end pr-4">
+        //             <button onClick={(e) => { e.stopPropagation(); handleEdit(r) }} className="text-[10px] text-primary-600 font-bold hover:underline">EDIT</button>
+        //         </div>
+        //     )
+        // },
     ]
 
     const renderExpanded = (r) => (
