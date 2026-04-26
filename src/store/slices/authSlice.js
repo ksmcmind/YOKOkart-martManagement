@@ -33,7 +33,7 @@ export const verifyOtp = createAsyncThunk('auth/verifyOtp', async ({ phone, otp 
     const user = res.data.user
     if (user.role === 'super_admin') return rejectWithValue('Use Super Admin panel')
     if (!MART_ROLES.includes(user.role)) return rejectWithValue('Access denied. Mart staff only.')
-    if (!user.martId) return rejectWithValue('No mart assigned. Contact admin.')
+    if (!user.id) return rejectWithValue('No mart assigned. Contact admin.')
 
     localStorage.setItem(KEY, JSON.stringify(user))
     return res.data
