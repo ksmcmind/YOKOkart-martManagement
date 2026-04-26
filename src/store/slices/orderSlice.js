@@ -1,10 +1,18 @@
 // src/store/slices/orderSlice.js
+//
+// Extends your existing slice with:
+//   - fetchOrderDetail        (GET /api/orders/:id)
+//   - fetchOrderTransactions  (GET /api/orders/:id/transactions)
+//   - cancelOrder             (POST /api/orders/:id/cancel)
+//   - packOrderItem           (PATCH /api/orders/:id/items/:itemId/pack)
+//
+// Existing thunks kept exactly as-is.
+
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit'
 import api from '../../api/index'
 
-// ── Async thunks ──────────────────────────────────────────────
+// ── Existing thunks (unchanged) ──────────────────────────────────────────────
 
-// Fetch ALL orders — store in Redux, filter client-side on tab switch
 export const fetchOrders = createAsyncThunk(
     'order/fetchAll',
     async ({ martId, status = '' }, { rejectWithValue }) => {
@@ -21,7 +29,6 @@ export const fetchOrders = createAsyncThunk(
     }
 )
 
-// Fetch mart stats (today by default)
 export const fetchOrderStats = createAsyncThunk(
     'order/fetchStats',
     async ({ martId, range = '1 day' }, { rejectWithValue }) => {
@@ -35,7 +42,6 @@ export const fetchOrderStats = createAsyncThunk(
     }
 )
 
-// Update order status — updates Redux store immediately (optimistic)
 export const updateOrderStatus = createAsyncThunk(
     'order/updateStatus',
     async ({ orderId, status, reason }, { rejectWithValue }) => {
@@ -49,7 +55,6 @@ export const updateOrderStatus = createAsyncThunk(
     }
 )
 
-// Confirm order
 export const confirmOrder = createAsyncThunk(
     'order/confirm',
     async ({ orderId }, { rejectWithValue }) => {
@@ -63,7 +68,6 @@ export const confirmOrder = createAsyncThunk(
     }
 )
 
-// Assign driver
 export const assignDriver = createAsyncThunk(
     'order/assignDriver',
     async ({ orderId, driverId }, { rejectWithValue }) => {
@@ -77,20 +81,84 @@ export const assignDriver = createAsyncThunk(
     }
 )
 
+// ── NEW thunks ───────────────────────────────────────────────────────────────
+
+// Fetch full order detail (with items) for the detail modal
+export const fetchOrderDetail = createAsyncThunk(
+    'order/fetchDetail',
+    async (orderId, { rejectWithValue }) => {
+        if (!orderId) return rejectWithValue('orderId required')
+        try {
+            const res = await api.get(`/orders/${orderId}`)
+            if (!res.success) return rejectWithValue(res.message)
+            return res.data
+        } catch (err) {
+            return rejectWithValue(err.message)
+        }
+    }
+)
+
+// Fetch stock movements caused by an order (audit trail)
+export const fetchOrderTransactions = createAsyncThunk(
+    'order/fetchTransactions',
+    async (orderId, { rejectWithValue }) => {
+        if (!orderId) return rejectWithValue('orderId required')
+        try {
+            const res = await api.get(`/orders/${orderId}/transactions`)
+            if (!res.success) return rejectWithValue(res.message)
+            return { orderId, txns: res.data || [] }
+        } catch (err) {
+            return rejectWithValue(err.message)
+        }
+    }
+)
+
+// Cancel an order (reason required — backend enforces)
+export const cancelOrder = createAsyncThunk(
+    'order/cancel',
+    async ({ orderId, reason }, { rejectWithValue }) => {
+        if (!reason || !reason.trim()) return rejectWithValue('reason required')
+        try {
+            const res = await api.post(`/orders/${orderId}/cancel`, { reason: reason.trim() })
+            if (!res.success) return rejectWithValue(res.message)
+            return res.data
+        } catch (err) {
+            return rejectWithValue(err.message)
+        }
+    }
+)
+
+// Mark a single line item as packed (auto-advances order to 'packed' when all done)
+export const packOrderItem = createAsyncThunk(
+    'order/packItem',
+    async ({ orderId, itemId }, { rejectWithValue }) => {
+        try {
+            const res = await api.patch(`/orders/${orderId}/items/${itemId}/pack`)
+            if (!res.success) return rejectWithValue(res.message)
+            return { orderId, ...res.data }   // { orderId, item, orderFullyPacked }
+        } catch (err) {
+            return rejectWithValue(err.message)
+        }
+    }
+)
+
 // ── Slice ─────────────────────────────────────────────────────
 const orderSlice = createSlice({
     name: 'order',
     initialState: {
-        list: [],      // all orders — filtered client-side
-        stats: null,    // mart dashboard stats
+        list: [],
+        stats: null,
+        detail: null,                 // full order with items (for modal)
+        detailLoading: false,
+        txnsByOrder: {},              // { [orderId]: [txn, ...] }
         loading: false,
         statsLoading: false,
         error: null,
     },
     reducers: {
         clearOrderError: (s) => { s.error = null },
+        clearOrderDetail: (s) => { s.detail = null },
 
-        // Optimistically update a single order in the list
         updateOrderInList: (s, a) => {
             const idx = s.list.findIndex(o => o.id === a.payload.id)
             if (idx !== -1) s.list[idx] = { ...s.list[idx], ...a.payload }
@@ -118,26 +186,52 @@ const orderSlice = createSlice({
             })
             .addCase(fetchOrderStats.rejected, (s) => { s.statsLoading = false })
 
-        // ── updateOrderStatus ─────────────────────────────────────
-        // Update the order in list without refetching everything
+        // ── fetchOrderDetail ──────────────────────────────────────
         builder
-            .addCase(updateOrderStatus.fulfilled, (s, a) => {
-                const idx = s.list.findIndex(o => o.id === a.payload.id)
-                if (idx !== -1) s.list[idx] = { ...s.list[idx], ...a.payload }
+            .addCase(fetchOrderDetail.pending, (s) => { s.detailLoading = true })
+            .addCase(fetchOrderDetail.fulfilled, (s, a) => {
+                s.detailLoading = false
+                s.detail = a.payload
+            })
+            .addCase(fetchOrderDetail.rejected, (s) => { s.detailLoading = false })
+
+        // ── fetchOrderTransactions ────────────────────────────────
+        builder
+            .addCase(fetchOrderTransactions.fulfilled, (s, a) => {
+                s.txnsByOrder[a.payload.orderId] = a.payload.txns
             })
 
-        // ── confirmOrder ──────────────────────────────────────────
-        builder
-            .addCase(confirmOrder.fulfilled, (s, a) => {
-                const idx = s.list.findIndex(o => o.id === a.payload.id)
-                if (idx !== -1) s.list[idx] = { ...s.list[idx], ...a.payload }
-            })
+        // ── Mutations: keep list AND detail in sync ───────────────
+        const syncOrder = (s, payload) => {
+            if (!payload?.id) return
+            const idx = s.list.findIndex(o => o.id === payload.id)
+            if (idx !== -1) s.list[idx] = { ...s.list[idx], ...payload }
+            if (s.detail?.id === payload.id) {
+                s.detail = { ...s.detail, ...payload }
+            }
+        }
 
-        // ── assignDriver ──────────────────────────────────────────
         builder
-            .addCase(assignDriver.fulfilled, (s, a) => {
-                const idx = s.list.findIndex(o => o.id === a.payload.id)
-                if (idx !== -1) s.list[idx] = { ...s.list[idx], ...a.payload }
+            .addCase(updateOrderStatus.fulfilled, (s, a) => syncOrder(s, a.payload))
+            .addCase(confirmOrder.fulfilled, (s, a) => syncOrder(s, a.payload))
+            .addCase(assignDriver.fulfilled, (s, a) => syncOrder(s, a.payload))
+            .addCase(cancelOrder.fulfilled, (s, a) => syncOrder(s, a.payload))
+
+        // ── packOrderItem ─────────────────────────────────────────
+        builder
+            .addCase(packOrderItem.fulfilled, (s, a) => {
+                const { orderId, item, orderFullyPacked } = a.payload
+                // Update the line item inside detail.items[]
+                if (s.detail?.id === orderId && Array.isArray(s.detail.items)) {
+                    const idx = s.detail.items.findIndex(i => i.id === item.id)
+                    if (idx !== -1) s.detail.items[idx] = { ...s.detail.items[idx], ...item }
+                }
+                // If all items are packed, the backend advanced status to 'packed'
+                if (orderFullyPacked) {
+                    if (s.detail?.id === orderId) s.detail.status = 'packed'
+                    const lIdx = s.list.findIndex(o => o.id === orderId)
+                    if (lIdx !== -1) s.list[lIdx].status = 'packed'
+                }
             })
     },
 })
@@ -146,16 +240,19 @@ const orderSlice = createSlice({
 export const selectAllOrders = (s) => s.order.list
 export const selectOrderLoading = (s) => s.order.loading
 export const selectOrderStats = (s) => s.order.stats
+export const selectOrderDetail = (s) => s.order.detail
+export const selectOrderDetailLoading = (s) => s.order.detailLoading
+export const selectOrderTxns = (s, orderId) => s.order.txnsByOrder[orderId] || []
 
-// Client-side filter — no API call on tab switch ✅
 export const selectOrdersByStatus = (s, status) =>
     status
         ? s.order.list.filter(o => o.status === status)
         : s.order.list
 
-// Count by status — for badges
 export const selectOrderCountByStatus = (s, status) =>
     s.order.list.filter(o => o.status === status).length
 
-export const { clearOrderError, updateOrderInList } = orderSlice.actions
+export const {
+    clearOrderError, clearOrderDetail, updateOrderInList,
+} = orderSlice.actions
 export default orderSlice.reducer

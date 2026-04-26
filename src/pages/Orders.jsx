@@ -1,361 +1,419 @@
 // src/pages/Orders.jsx
-import { useEffect, useState, useCallback } from 'react'
+//
+// Mart-side order management.
+// Status flow handled here:
+//   pending → confirmed → preparing → packed → assigned → picked_up → out_for_delivery → delivered
+//                                       ↑
+//                              Driver dropdown appears here
+//   any state (before delivered) → cancelled (stock auto-returned by backend)
+
+import { useEffect, useMemo, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import {
     fetchOrders,
     fetchOrderStats,
+    fetchOrderDetail,
+    confirmOrder,
     updateOrderStatus,
+    cancelOrder,
     assignDriver,
+    packOrderItem,
     selectAllOrders,
     selectOrderLoading,
     selectOrderStats,
-    selectOrdersByStatus,
+    selectOrderDetail,
+    selectOrderDetailLoading,
+    clearOrderDetail,
 } from '../store/slices/orderSlice'
+import {
+    fetchAvailableDrivers,
+    selectAvailableDrivers,
+    selectAvailableDriversLoading,
+} from '../store/slices/driverSlice'
 import { showToast } from '../store/slices/uiSlice'
+import PageHeader from '../components/PageHeader'
+import Button from '../components/Button'
+import Grid from '../components/Grid'
+import Modal from '../components/Modal'
+import Badge from '../components/Badge'
+import Input from '../components/Input'
 import useAuth from '../hooks/useAuth'
 
-// ── Status config ─────────────────────────────────────────────
-const STATUS_CONFIG = {
-    pending: {
-        color: '#F59E0B', bg: '#FEF3C7', icon: '🕐',
-        next: (order) => order.order_type === 'pos' ? 'delivered' : 'packed',
-        action: (order) => order.order_type === 'pos' ? 'Complete Sale' : 'Mark Packed',
-    },
-    packed: {
-        color: '#06B6D4', bg: '#CFFAFE', icon: '📦',
-        next: null,
-        action: null,
-        isDriverAssign: true, // ← show assign driver button
-    },
-    assigned: {
-        color: '#8B5CF6', bg: '#EDE9FE', icon: '🚗',
-        next: 'out_for_delivery',
-        action: 'Out for Delivery',
-    },
-    out_for_delivery: {
-        color: '#F97316', bg: '#FFEDD5', icon: '🛵',
-        next: 'delivered',
-        action: 'Mark Delivered',
-    },
-    delivered: { color: '#10B981', bg: '#D1FAE5', icon: '✅', next: null, action: null },
-    cancelled: { color: '#EF4444', bg: '#FEE2E2', icon: '❌', next: null, action: null },
-    refunded: { color: '#6B7280', bg: '#F3F4F6', icon: '↩️', next: null, action: null },
+// ── Status flow ──────────────────────────────────────────────────────────────
+// What is the next "advance" action available from each status?
+// When status === 'packed' we don't show "next" here — we show the driver dropdown.
+const NEXT_ACTION = {
+    pending: { next: 'confirmed', label: 'Confirm', color: 'primary' },
+    confirmed: { next: 'preparing', label: 'Start Preparing', color: 'primary' },
+    preparing: { next: 'packed', label: 'Mark Ready', color: 'warning' },
+    // packed → custom (driver dropdown)
+    assigned: { next: 'picked_up', label: 'Picked Up', color: 'primary' },
+    picked_up: { next: 'out_for_delivery', label: 'Out for Delivery', color: 'primary' },
+    out_for_delivery: { next: 'delivered', label: 'Delivered', color: 'primary' },
 }
 
-// Orders.jsx
 const STATUS_TABS = [
-    { key: '', label: 'All', icon: '📋' },
-    { key: 'pending', label: 'Pending', icon: '🕐' },
-    { key: 'packed', label: 'Packed', icon: '📦' },
-    { key: 'assigned', label: 'Assigned', icon: '🚗' },
-    { key: 'out_for_delivery', label: 'On the Way', icon: '🛵' },
-    { key: 'delivered', label: 'Delivered', icon: '✅' },
-    { key: 'cancelled', label: 'Cancelled', icon: '❌' },
+    '', 'pending', 'confirmed', 'preparing', 'packed',
+    'assigned', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled',
 ]
 
-// ── Helpers ───────────────────────────────────────────────────
-const fmt = (n) => `₹${parseFloat(n || 0).toFixed(2)}`
-const timeAgo = (dateStr) => {
-    const diff = Math.floor((Date.now() - new Date(dateStr)) / 1000)
-    if (diff < 60) return `${diff}s ago`
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-    return new Date(dateStr).toLocaleDateString()
-}
-const parseAddress = (raw) => {
-    if (!raw) return {}
-    if (typeof raw === 'object') return raw
-    try { return JSON.parse(raw) } catch { return { line1: raw } } // ← plain string fallback
-}
-// ── Status Badge ─────────────────────────────────────────────
-function StatusBadge({ status }) {
-    const cfg = STATUS_CONFIG[status] || { color: '#6B7280', bg: '#F3F4F6', icon: '?' }
-    return (
-        <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700,
-            color: cfg.color, background: cfg.bg, textTransform: 'uppercase', letterSpacing: 0.5,
-        }}>
-            {cfg.icon} {status?.replace(/_/g, ' ')}
-        </span>
-    )
+const STATUS_BADGE_COLOR = {
+    pending: 'yellow',
+    confirmed: 'blue',
+    preparing: 'blue',
+    packed: 'purple',
+    assigned: 'purple',
+    picked_up: 'purple',
+    out_for_delivery: 'purple',
+    delivered: 'green',
+    cancelled: 'red',
+    refunded: 'gray',
 }
 
-// ── Stat Card ─────────────────────────────────────────────────
-function StatCard({ label, value, color, icon }) {
+const fmtDateTime = (iso) => {
+    if (!iso) return '—'
+    return new Date(iso).toLocaleString('en-IN', {
+        day: '2-digit', month: 'short',
+        hour: '2-digit', minute: '2-digit', hour12: true,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Driver Assignment Inline Picker
+// Shows a dropdown + Assign button. Used in the grid row when status='packed'
+// and inside the detail modal.
+// ─────────────────────────────────────────────────────────────────────────────
+function DriverPicker({ orderId, martId, onAssigned }) {
+    const dispatch = useDispatch()
+    const drivers = useSelector(selectAvailableDrivers)
+    const loading = useSelector(selectAvailableDriversLoading)
+    const [driverId, setDriverId] = useState('')
+    const [busy, setBusy] = useState(false)
+
+    useEffect(() => {
+        if (!drivers.length && !loading) {
+            dispatch(fetchAvailableDrivers({ martId }))
+        }
+    }, [martId, drivers.length, loading, dispatch])
+
+    const handleAssign = async (e) => {
+        e?.stopPropagation()
+        if (!driverId) {
+            dispatch(showToast({ message: 'Pick a driver first', type: 'error' }))
+            return
+        }
+        setBusy(true)
+        const action = await dispatch(assignDriver({ orderId, driverId }))
+        setBusy(false)
+        if (assignDriver.fulfilled.match(action)) {
+            dispatch(showToast({ message: 'Driver assigned', type: 'success' }))
+            setDriverId('')
+            onAssigned?.()
+        } else {
+            dispatch(showToast({
+                message: action.payload || 'Assign failed',
+                type: 'error',
+            }))
+        }
+    }
+
     return (
-        <div style={{
-            background: '#fff', borderRadius: 16, padding: '20px 24px',
-            border: '1px solid #F1F5F9', boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-            display: 'flex', alignItems: 'center', gap: 16,
-        }}>
-            <div style={{
-                width: 48, height: 48, borderRadius: 14,
-                background: color + '15', display: 'grid', placeItems: 'center', fontSize: 22,
-            }}>{icon}</div>
-            <div>
-                <div style={{ fontSize: 22, fontWeight: 800, color: '#0F172A', lineHeight: 1 }}>{value}</div>
-                <div style={{ fontSize: 12, color: '#94A3B8', marginTop: 4, fontWeight: 500 }}>{label}</div>
-            </div>
+        <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+            <select
+                value={driverId}
+                onChange={e => setDriverId(e.target.value)}
+                disabled={loading || busy}
+                className="text-xs border border-gray-200 rounded px-2 py-1 bg-white outline-none focus:border-primary-400 max-w-[140px]"
+            >
+                <option value="">{loading ? 'Loading…' : 'Pick driver'}</option>
+                {drivers.map(d => (
+                    <option key={d.id} value={d.id}>
+                        {d.name}{d.vehicle_number ? ` · ${d.vehicle_number}` : ''}
+                    </option>
+                ))}
+            </select>
+            <Button
+                variant="primary"
+                size="sm"
+                loading={busy}
+                disabled={!driverId || busy}
+                onClick={handleAssign}
+            >
+                Assign
+            </Button>
         </div>
     )
 }
 
-// ── Order Card ────────────────────────────────────────────────
-function OrderCard({ order, onView, onStatusUpdate, updating }) {
-    const cfg = STATUS_CONFIG[order.status] || {}
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancel modal — reason required
+// ─────────────────────────────────────────────────────────────────────────────
+function CancelModal({ open, onClose, orderId }) {
+    const dispatch = useDispatch()
+    const [reason, setReason] = useState('')
+    const [busy, setBusy] = useState(false)
 
+    useEffect(() => { if (open) setReason('') }, [open])
 
-    const addr = parseAddress(order.delivery_address)
-
+    const submit = async () => {
+        if (!reason.trim()) {
+            dispatch(showToast({ message: 'Reason is required', type: 'error' }))
+            return
+        }
+        setBusy(true)
+        const action = await dispatch(cancelOrder({ orderId, reason }))
+        setBusy(false)
+        if (cancelOrder.fulfilled.match(action)) {
+            dispatch(showToast({ message: 'Order cancelled', type: 'success' }))
+            onClose()
+        } else {
+            dispatch(showToast({ message: action.payload || 'Cancel failed', type: 'error' }))
+        }
+    }
 
     return (
-        <div style={{
-            background: '#fff', borderRadius: 16, border: '1px solid #F1F5F9',
-            boxShadow: '0 1px 4px rgba(0,0,0,0.06)', overflow: 'hidden',
-            transition: 'box-shadow 0.2s', cursor: 'pointer',
-        }}
-            onMouseEnter={e => e.currentTarget.style.boxShadow = '0 4px 16px rgba(0,0,0,0.1)'}
-            onMouseLeave={e => e.currentTarget.style.boxShadow = '0 1px 4px rgba(0,0,0,0.06)'}
+        <Modal
+            title="Cancel Order"
+            open={open}
+            onClose={onClose}
+            size="md"
+            footer={
+                <>
+                    <Button variant="secondary" onClick={onClose}>Keep Order</Button>
+                    <Button variant="danger" loading={busy} onClick={submit}>Cancel Order</Button>
+                </>
+            }
         >
-            {/* Top bar */}
-            <div style={{
-                height: 4, background: cfg.color || '#E2E8F0',
-            }} />
-
-            <div style={{ padding: '16px 20px' }}>
-                {/* Header row */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-                    <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontFamily: 'monospace', fontWeight: 800, fontSize: 14, color: '#1E40AF' }}>
-                                #{order.order_number || order.id?.slice(-8).toUpperCase()}
-                            </span>
-                            <StatusBadge status={order.status} />
-                        </div>
-                        <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 4 }}>
-                            {timeAgo(order.created_at)} · {order.order_type?.toUpperCase()} · {order.payment_method?.toUpperCase()}
-                        </div>
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: 20, fontWeight: 800, color: '#0F172A' }}>{fmt(order.total)}</div>
-                        <div style={{ fontSize: 11, color: '#94A3B8' }}>incl. ₹{order.delivery_fee || 0} delivery</div>
-                    </div>
-                </div>
-
-                {/* Address */}
-                {addr.line1 && (
-                    <div style={{
-                        background: '#F8FAFC', borderRadius: 10, padding: '8px 12px',
-                        fontSize: 12, color: '#475569', marginBottom: 12,
-                        display: 'flex', alignItems: 'flex-start', gap: 6,
-                    }}>
-                        <span>📍</span>
-                        <div>
-                            <div style={{ fontWeight: 600, color: '#1E293B' }}>{addr.name}</div>
-                            <div>{addr.line1}, {addr.city} {addr.pincode}</div>
-                            {addr.phone && <div style={{ color: '#94A3B8' }}>{addr.phone}</div>}
-                        </div>
-                    </div>
-                )}
-
-                {/* Actions */}
-                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                    <button
-                        onClick={() => onView(order)}
-                        style={{
-                            flex: 1, padding: '8px 0', borderRadius: 10, border: '1px solid #E2E8F0',
-                            background: '#F8FAFC', color: '#475569', fontWeight: 600, fontSize: 13, cursor: 'pointer',
-                        }}
-                    >
-                        View Details
-                    </button>
-                    {cfg.next && (
-                        <button
-                            onClick={() => onStatusUpdate(order.id, cfg.next)}
-                            disabled={updating === order.id}
-                            style={{
-                                flex: 2, padding: '8px 0', borderRadius: 10, border: 'none',
-                                background: cfg.color, color: '#fff', fontWeight: 700, fontSize: 13,
-                                cursor: updating === order.id ? 'not-allowed' : 'pointer',
-                                opacity: updating === order.id ? 0.7 : 1,
-                            }}
-                        >
-                            {updating === order.id ? '...' : `${cfg.action} →`}
-                        </button>
-                    )}
-                </div>
+            <div className="space-y-3">
+                <p className="text-sm text-gray-600">
+                    This will cancel the order and automatically return the stock to inventory.
+                    A return transaction will be logged for each item.
+                </p>
+                <Input
+                    label="Reason *"
+                    value={reason}
+                    onChange={e => setReason(e.target.value)}
+                    placeholder="Customer requested cancellation"
+                />
             </div>
-        </div>
+        </Modal>
     )
 }
 
-// ── Order Detail Modal ────────────────────────────────────────
-function OrderModal({ order, onClose, onStatusUpdate, updating }) {
-    if (!order) return null
-    const cfg = STATUS_CONFIG[order.status] || {}
-    const addr = parseAddress(order.delivery_address)
+// ─────────────────────────────────────────────────────────────────────────────
+// Order Detail Modal — shows items, allows packing, status advance, cancel
+// ─────────────────────────────────────────────────────────────────────────────
+function OrderDetailModal({ open, onClose, orderId, martId }) {
+    const dispatch = useDispatch()
+    const order = useSelector(selectOrderDetail)
+    const loading = useSelector(selectOrderDetailLoading)
+    const [cancelOpen, setCancelOpen] = useState(false)
+    const [busy, setBusy] = useState(false)
+
+    useEffect(() => {
+        if (open && orderId) dispatch(fetchOrderDetail(orderId))
+        return () => { if (!open) dispatch(clearOrderDetail()) }
+    }, [open, orderId, dispatch])
+
+    if (!open) return null
+
+    const advance = async (status) => {
+        setBusy(true)
+        const action = status === 'confirmed'
+            ? await dispatch(confirmOrder({ orderId }))
+            : await dispatch(updateOrderStatus({ orderId, status }))
+        setBusy(false)
+        if (!action.error) onClose()
+    }
+
+    const handlePack = async (itemId) => {
+        await dispatch(packOrderItem({ orderId, itemId }))
+    }
+
+    const status = order?.status
+    const next = NEXT_ACTION[status]
+    const showDriverPicker = status === 'packed'
+    const canCancel = order && !['delivered', 'cancelled', 'refunded'].includes(status)
 
     return (
-        <div style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            zIndex: 1000, padding: 20,
-        }} onClick={e => e.target === e.currentTarget && onClose()}>
-            <div style={{
-                background: '#fff', borderRadius: 20, width: '100%', maxWidth: 560,
-                maxHeight: '90vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-            }}>
-                {/* Modal header */}
-                <div style={{
-                    padding: '20px 24px', borderBottom: '1px solid #F1F5F9',
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    position: 'sticky', top: 0, background: '#fff', zIndex: 1,
-                }}>
-                    <div>
-                        <div style={{ fontWeight: 800, fontSize: 18, color: '#0F172A' }}>
-                            #{order.order_number || order.id?.slice(-8).toUpperCase()}
-                        </div>
-                        <StatusBadge status={order.status} />
-                    </div>
-                    <button onClick={onClose} style={{
-                        width: 36, height: 36, borderRadius: 10, border: 'none',
-                        background: '#F1F5F9', cursor: 'pointer', fontSize: 18,
-                    }}>×</button>
-                </div>
-
-                <div style={{ padding: 24 }}>
-                    {/* Order summary */}
-                    <div style={{
-                        display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20,
-                    }}>
-                        {[
-                            ['💰 Total', fmt(order.total)],
-                            ['🧾 Subtotal', fmt(order.subtotal)],
-                            ['🚚 Delivery', fmt(order.delivery_fee)],
-                            ['💳 Payment', order.payment_method?.toUpperCase()],
-                            ['📦 Type', order.order_type?.toUpperCase()],
-                            ['⏱ ETA', order.eta_minutes ? `${order.eta_minutes} min` : '—'],
-                        ].map(([label, value]) => (
-                            <div key={label} style={{
-                                background: '#F8FAFC', borderRadius: 12, padding: '12px 16px',
-                            }}>
-                                <div style={{ fontSize: 11, color: '#94A3B8', marginBottom: 4 }}>{label}</div>
-                                <div style={{ fontWeight: 700, color: '#0F172A' }}>{value}</div>
-                            </div>
-                        ))}
-                    </div>
-
-                    {/* Delivery address */}
-                    {addr.line1 && (
-                        <div style={{
-                            background: '#F0FDF4', border: '1px solid #BBF7D0',
-                            borderRadius: 12, padding: 16, marginBottom: 20,
-                        }}>
-                            <div style={{ fontWeight: 700, color: '#166534', marginBottom: 8, fontSize: 13 }}>📍 Delivery Address</div>
-                            <div style={{ fontWeight: 600, color: '#15803D' }}>{addr.name}</div>
-                            <div style={{ color: '#166534', fontSize: 13 }}>{addr.line1}, {addr.city} - {addr.pincode}</div>
-                            {addr.phone && <div style={{ color: '#4ADE80', fontSize: 12, marginTop: 4 }}>{addr.phone}</div>}
-                            {order.delivery_notes && (
-                                <div style={{ marginTop: 8, color: '#166534', fontSize: 12, fontStyle: 'italic' }}>
-                                    Note: {order.delivery_notes}
-                                </div>
+        <>
+            <Modal
+                title={`Order #${order?.order_number || orderId?.slice(-8)}`}
+                open={open}
+                onClose={onClose}
+                size="xl"
+                footer={
+                    <div className="flex items-center justify-between w-full">
+                        <Button variant="secondary" onClick={onClose}>Close</Button>
+                        <div className="flex items-center gap-2">
+                            {canCancel && (
+                                <Button variant="danger" onClick={() => setCancelOpen(true)}>
+                                    Cancel Order
+                                </Button>
+                            )}
+                            {showDriverPicker && (
+                                <DriverPicker
+                                    orderId={orderId}
+                                    martId={martId}
+                                    onAssigned={onClose}
+                                />
+                            )}
+                            {next && (
+                                <Button
+                                    variant={next.color}
+                                    loading={busy}
+                                    onClick={() => advance(next.next)}
+                                >
+                                    {next.label}
+                                </Button>
                             )}
                         </div>
-                    )}
-
-                    {/* Order items */}
-                    {order.items?.length > 0 && (
-                        <div style={{ marginBottom: 20 }}>
-                            <div style={{ fontWeight: 700, color: '#0F172A', marginBottom: 12, fontSize: 14 }}>
-                                🛍 Items ({order.items.length})
-                            </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                {order.items.map((item, i) => (
-                                    <div key={i} style={{
-                                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                        background: '#F8FAFC', borderRadius: 10, padding: '10px 14px',
-                                    }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                            <div style={{
-                                                width: 36, height: 36, borderRadius: 8, background: '#E2E8F0',
-                                                display: 'grid', placeItems: 'center', fontSize: 16,
-                                            }}>
-                                                {item.product_image
-                                                    ? <img src={item.product_image} alt="" style={{ width: '100%', borderRadius: 8, objectFit: 'cover' }} />
-                                                    : '📦'}
-                                            </div>
-                                            <div>
-                                                <div style={{ fontWeight: 600, fontSize: 13, color: '#1E293B' }}>{item.product_name}</div>
-                                                <div style={{ fontSize: 11, color: '#94A3B8' }}>{item.brand} · {item.unit} · ×{parseFloat(item.quantity)}</div>
-                                            </div>
-                                        </div>
-                                        <div style={{ textAlign: 'right' }}>
-                                            <div style={{ fontWeight: 700, color: '#0F172A' }}>{fmt(item.total_price)}</div>
-                                            <div style={{ fontSize: 11, color: '#94A3B8' }}>{fmt(item.unit_price)} each</div>
-                                        </div>
-                                    </div>
-                                ))}
+                    </div>
+                }
+            >
+                {loading || !order ? (
+                    <p className="text-sm text-gray-500 py-8 text-center">Loading…</p>
+                ) : (
+                    <div className="space-y-5">
+                        {/* Header strip */}
+                        <div className="flex items-center justify-between flex-wrap gap-3">
+                            <Badge variant={STATUS_BADGE_COLOR[status] || 'gray'}>
+                                {status?.toUpperCase()}
+                            </Badge>
+                            <div className="text-xs text-gray-500">
+                                Placed {fmtDateTime(order.created_at)}
+                                {order.confirmed_at && ` · Confirmed ${fmtDateTime(order.confirmed_at)}`}
+                                {order.delivered_at && ` · Delivered ${fmtDateTime(order.delivered_at)}`}
                             </div>
                         </div>
-                    )}
 
-                    {/* Status timeline */}
-                    <div style={{
-                        background: '#F8FAFC', borderRadius: 12, padding: 16, marginBottom: 20,
-                    }}>
-                        <div style={{ fontWeight: 700, color: '#0F172A', marginBottom: 12, fontSize: 13 }}>📅 Timeline</div>
-                        {[
-                            ['Created', order.created_at],
-                            ['Confirmed', order.confirmed_at],
-                            ['Delivered', order.delivered_at],
-                            ['Cancelled', order.cancelled_at],
-                        ].filter(([, v]) => v).map(([label, value]) => (
-                            <div key={label} style={{
-                                display: 'flex', justifyContent: 'space-between',
-                                fontSize: 12, color: '#475569', padding: '4px 0',
-                                borderBottom: '1px solid #E2E8F0',
-                            }}>
-                                <span style={{ fontWeight: 600 }}>{label}</span>
-                                <span>{new Date(value).toLocaleString()}</span>
+                        {/* Money + meta grid */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                            {[
+                                ['Total', `₹${order.total}`],
+                                ['Subtotal', `₹${order.subtotal}`],
+                                ['Delivery Fee', `₹${order.delivery_fee || 0}`],
+                                ['Tax', `₹${order.tax || 0}`],
+                                ['Discount', `₹${order.discount || 0}`],
+                                ['Payment', order.payment_method?.toUpperCase()],
+                                ['Pay Status', order.payment_status],
+                                ['Type', order.order_type],
+                            ].map(([label, value]) => (
+                                <div key={label} className="bg-gray-50 rounded-lg p-3">
+                                    <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">{label}</p>
+                                    <p className="font-bold text-gray-900 text-sm mt-0.5">{value || '—'}</p>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Delivery address */}
+                        {order.delivery_address && (
+                            <div className="bg-gray-50 rounded-lg p-3">
+                                <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold mb-1">
+                                    Delivery Address
+                                </p>
+                                <p className="font-medium text-gray-900 text-sm">{order.delivery_address.name}</p>
+                                <p className="text-xs text-gray-600">
+                                    {order.delivery_address.line1}
+                                    {order.delivery_address.line2 && `, ${order.delivery_address.line2}`}
+                                </p>
+                                <p className="text-xs text-gray-600">
+                                    {order.delivery_address.city} {order.delivery_address.pincode}
+                                </p>
+                                <p className="text-xs text-gray-500 mt-0.5">📞 {order.delivery_address.phone}</p>
                             </div>
-                        ))}
-                        {order.cancelled_reason && (
-                            <div style={{ marginTop: 8, fontSize: 12, color: '#EF4444' }}>
-                                Reason: {order.cancelled_reason}
+                        )}
+
+                        {/* Driver info if assigned */}
+                        {order.driver_name && (
+                            <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+                                <p className="text-[10px] uppercase tracking-widest text-blue-600 font-bold mb-1">
+                                    Assigned Driver
+                                </p>
+                                <p className="font-bold text-gray-900 text-sm">{order.driver_name}</p>
+                                <p className="text-xs text-gray-600">📞 {order.driver_phone}</p>
+                            </div>
+                        )}
+
+                        {/* Items table */}
+                        {Array.isArray(order.items) && order.items.length > 0 && (
+                            <div>
+                                <h4 className="text-[10px] uppercase tracking-widest text-gray-500 font-bold mb-2">
+                                    Items ({order.items.length})
+                                </h4>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                        <thead>
+                                            <tr className="border-b border-gray-200">
+                                                <th className="text-left pb-2 pr-3 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Product</th>
+                                                <th className="text-right pb-2 pr-3 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Qty</th>
+                                                <th className="text-right pb-2 pr-3 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Price</th>
+                                                <th className="text-right pb-2 pr-3 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Total</th>
+                                                <th className="text-center pb-2 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Pack</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-100">
+                                            {order.items.map(it => (
+                                                <tr key={it.id}>
+                                                    <td className="py-2 pr-3">
+                                                        <p className="font-medium text-gray-900">{it.product_name}</p>
+                                                        {it.brand && <p className="text-[10px] text-gray-500">{it.brand} · {it.unit}</p>}
+                                                    </td>
+                                                    <td className="py-2 pr-3 text-right tabular-nums">{it.quantity}</td>
+                                                    <td className="py-2 pr-3 text-right tabular-nums">₹{it.unit_price}</td>
+                                                    <td className="py-2 pr-3 text-right tabular-nums font-bold">₹{it.total_price}</td>
+                                                    <td className="py-2 text-center">
+                                                        {it.is_packed ? (
+                                                            <Badge variant="green" size="xs">PACKED</Badge>
+                                                        ) : (status === 'preparing' || status === 'confirmed') ? (
+                                                            <button
+                                                                onClick={() => handlePack(it.id)}
+                                                                className="text-[10px] text-primary-600 font-bold hover:bg-primary-50 px-2 py-1 rounded"
+                                                            >
+                                                                MARK PACKED
+                                                            </button>
+                                                        ) : (
+                                                            <span className="text-gray-300 text-[10px]">—</span>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Cancellation info */}
+                        {order.cancelled_at && (
+                            <div className="bg-red-50 border border-red-100 rounded-lg p-3">
+                                <p className="text-[10px] uppercase tracking-widest text-red-600 font-bold mb-1">
+                                    Cancelled
+                                </p>
+                                <p className="text-xs text-gray-700">
+                                    {fmtDateTime(order.cancelled_at)} by {order.cancelled_by}
+                                </p>
+                                {order.cancelled_reason && (
+                                    <p className="text-xs text-gray-600 mt-1">"{order.cancelled_reason}"</p>
+                                )}
                             </div>
                         )}
                     </div>
+                )}
+            </Modal>
 
-                    {/* Action buttons */}
-                    <div style={{ display: 'flex', gap: 10 }}>
-                        <button onClick={onClose} style={{
-                            flex: 1, padding: '12px 0', borderRadius: 12, border: '1px solid #E2E8F0',
-                            background: '#F8FAFC', color: '#475569', fontWeight: 600, cursor: 'pointer',
-                        }}>
-                            Close
-                        </button>
-                        {cfg.next && (
-                            <button
-                                onClick={() => { onStatusUpdate(order.id, cfg.next); onClose() }}
-                                disabled={updating === order.id}
-                                style={{
-                                    flex: 2, padding: '12px 0', borderRadius: 12, border: 'none',
-                                    background: cfg.color, color: '#fff', fontWeight: 700, fontSize: 14,
-                                    cursor: 'pointer',
-                                }}
-                            >
-                                {cfg.action} →
-                            </button>
-                        )}
-                    </div>
-                </div>
-            </div>
-        </div>
+            <CancelModal
+                open={cancelOpen}
+                onClose={() => setCancelOpen(false)}
+                orderId={orderId}
+            />
+        </>
     )
 }
 
-// ── Main Orders Page ──────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Page
+// ─────────────────────────────────────────────────────────────────────────────
 export default function Orders() {
     const dispatch = useDispatch()
     const orders = useSelector(selectAllOrders)
@@ -363,107 +421,216 @@ export default function Orders() {
     const stats = useSelector(selectOrderStats)
     const { martId } = useAuth()
 
-    const [activeTab, setActiveTab] = useState('')
-    const [selected, setSelected] = useState(null)
-    const [updating, setUpdating] = useState(null)
-    const [lastFetched, setLastFetched] = useState(null)
+    const [statusFilter, setStatusFilter] = useState('')
+    const [search, setSearch] = useState('')
+    const [selectedId, setSelectedId] = useState(null)
+    const [busyOrderId, setBusyOrderId] = useState(null)
 
-    // Filter orders from Redux — no API call on tab switch
-    const filteredOrders = useSelector(state => selectOrdersByStatus(state, activeTab))
-
-    const load = useCallback(() => {
-        if (!martId) return
-        dispatch(fetchOrders({ martId, status: '' })) // always fetch ALL, filter client-side
-        dispatch(fetchOrderStats({ martId }))
-        setLastFetched(new Date())
-    }, [martId, dispatch])
-
-    // Initial load
-    useEffect(() => { load() }, [load])
-
-    // Auto refresh every 30 seconds
-    useEffect(() => {
-        const t = setInterval(load, 30000)
-        return () => clearInterval(t)
-    }, [load])
-
-    const handleStatusUpdate = async (orderId, newStatus) => {
-        setUpdating(orderId)
-        const res = await dispatch(updateOrderStatus({ orderId, status: newStatus }))
-        setUpdating(null)
-        if (!res.error) {
-            dispatch(showToast({ message: `Order marked as ${newStatus.replace(/_/g, ' ')}`, type: 'success' }))
-            setSelected(null)
-        } else {
-            dispatch(showToast({ message: res.payload || 'Failed to update', type: 'error' }))
+    const load = () => {
+        if (martId) {
+            dispatch(fetchOrders({ martId, status: statusFilter }))
+            dispatch(fetchOrderStats({ martId, range: '1 day' }))
         }
     }
 
-    return (
-        <div style={{ padding: '24px 28px', background: '#F8FAFC', minHeight: '100vh' }}>
+    useEffect(() => { load() }, [martId, statusFilter])
 
-            {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
-                <div>
-                    <h1 style={{ fontSize: 26, fontWeight: 900, color: '#0F172A', margin: 0 }}>Orders</h1>
-                    <p style={{ color: '#94A3B8', margin: '4px 0 0', fontSize: 13 }}>
-                        {lastFetched ? `Last updated ${timeAgo(lastFetched)}` : 'Loading...'}
+    // Auto-refresh every 30s
+    useEffect(() => {
+        const t = setInterval(load, 30000)
+        return () => clearInterval(t)
+    }, [martId, statusFilter])
+
+    // Client-side search filter (over already-fetched list)
+    const filtered = useMemo(() => {
+        if (!search.trim()) return orders
+        const q = search.toLowerCase()
+        return orders.filter(o =>
+            o.id?.toLowerCase().includes(q) ||
+            o.order_number?.toLowerCase().includes(q) ||
+            o.customer_name?.toLowerCase().includes(q) ||
+            o.customer_phone?.toLowerCase().includes(q) ||
+            o.driver_name?.toLowerCase().includes(q)
+        )
+    }, [orders, search])
+
+    // Counts per status for tab badges
+    const counts = useMemo(() => {
+        const c = {}
+        for (const o of orders) c[o.status] = (c[o.status] || 0) + 1
+        c[''] = orders.length
+        return c
+    }, [orders])
+
+    // ── Inline action handlers ──────────────────────────────────────────────
+    const handleAdvance = async (e, order) => {
+        e.stopPropagation()
+        const next = NEXT_ACTION[order.status]
+        if (!next) return
+
+        setBusyOrderId(order.id)
+        if (next.next === 'confirmed') {
+            await dispatch(confirmOrder({ orderId: order.id }))
+        } else {
+            await dispatch(updateOrderStatus({ orderId: order.id, status: next.next }))
+        }
+        setBusyOrderId(null)
+    }
+
+    // ── Grid columns ────────────────────────────────────────────────────────
+    const columns = [
+        {
+            key: 'id',
+            label: 'Order',
+            render: r => (
+                <div className="py-1">
+                    <p className="font-mono text-[11px] font-bold text-gray-900">
+                        #{r.order_number || r.id?.slice(-8)}
                     </p>
+                    <p className="text-[10px] text-gray-400">{fmtDateTime(r.created_at)}</p>
                 </div>
-                <button
-                    onClick={load}
-                    style={{
-                        padding: '10px 20px', borderRadius: 12, border: '1px solid #E2E8F0',
-                        background: '#fff', color: '#475569', fontWeight: 600, cursor: 'pointer',
-                        display: 'flex', alignItems: 'center', gap: 6, fontSize: 13,
-                    }}
-                >
-                    ↻ Refresh
-                </button>
-            </div>
+            ),
+        },
+        {
+            key: 'customer',
+            label: 'Customer',
+            render: r => (
+                <div className="py-1">
+                    <p className="text-xs font-medium text-gray-900">{r.customer_name || '—'}</p>
+                    <p className="text-[10px] text-gray-500">{r.customer_phone || '—'}</p>
+                </div>
+            ),
+        },
+        {
+            key: 'total',
+            label: 'Total',
+            render: r => (
+                <div className="text-xs">
+                    <p className="font-bold text-gray-900 tabular-nums">₹{r.total}</p>
+                    <p className="text-[10px] text-gray-400 uppercase">{r.payment_method}</p>
+                </div>
+            ),
+        },
+        {
+            key: 'type',
+            label: 'Type',
+            render: r => (
+                <Badge variant={r.order_type === 'pos' ? 'blue' : 'gray'} size="xs">
+                    {r.order_type?.toUpperCase()}
+                </Badge>
+            ),
+        },
+        {
+            key: 'driver',
+            label: 'Driver',
+            render: r => r.driver_name
+                ? (
+                    <div className="text-[10px]">
+                        <p className="font-medium text-gray-700">{r.driver_name}</p>
+                        <p className="text-gray-400">{r.driver_phone}</p>
+                    </div>
+                )
+                : <span className="text-gray-300 text-[10px]">—</span>,
+        },
+        {
+            key: 'eta',
+            label: 'ETA',
+            render: r => r.eta_minutes
+                ? <span className="text-xs text-gray-700">{r.eta_minutes}m</span>
+                : <span className="text-gray-300 text-[10px]">—</span>,
+        },
+        {
+            key: 'status',
+            label: 'Status',
+            render: r => (
+                <Badge variant={STATUS_BADGE_COLOR[r.status] || 'gray'} size="xs">
+                    {r.status?.replace(/_/g, ' ')?.toUpperCase()}
+                </Badge>
+            ),
+        },
+        {
+            key: 'actions',
+            label: '',
+            render: r => {
+                const next = NEXT_ACTION[r.status]
+                const showDriverPicker = r.status === 'packed'
+                const isBusy = busyOrderId === r.id
 
-            {/* Stats */}
+                return (
+                    <div className="flex items-center justify-end gap-1.5 pr-2" onClick={e => e.stopPropagation()}>
+                        {showDriverPicker ? (
+                            <DriverPicker
+                                orderId={r.id}
+                                martId={martId}
+                                onAssigned={load}
+                            />
+                        ) : next ? (
+                            <Button
+                                variant={next.color}
+                                size="sm"
+                                loading={isBusy}
+                                onClick={(e) => handleAdvance(e, r)}
+                            >
+                                {next.label}
+                            </Button>
+                        ) : null}
+                        <button
+                            onClick={(e) => { e.stopPropagation(); setSelectedId(r.id) }}
+                            className="text-[10px] text-gray-600 font-black hover:bg-gray-100 px-2 py-1 rounded transition-colors uppercase tracking-tighter"
+                        >
+                            View
+                        </button>
+                    </div>
+                )
+            },
+        },
+    ]
+
+    return (
+        <div className="p-4 sm:p-6 space-y-4">
+            <PageHeader
+                title="Orders"
+                subtitle="Manage incoming orders and assign drivers"
+                action={<Button variant="secondary" onClick={load}>↻ Refresh</Button>}
+            />
+
+            {/* Stats cards */}
             {stats && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 28 }}>
-                    <StatCard label="Total Orders" value={stats.total_orders || 0} color="#3B82F6" icon="📋" />
-                    <StatCard label="Pending" value={stats.pending_orders || 0} color="#F59E0B" icon="🕐" />
-                    <StatCard label="Delivered" value={stats.delivered_orders || 0} color="#10B981" icon="✅" />
-                    <StatCard label="Revenue Today" value={fmt(stats.total_revenue)} color="#8B5CF6" icon="💰" />
+                <div className="flex gap-3 flex-wrap">
+                    {[
+                        { label: 'Total Today', value: stats.total_orders || 0, color: 'text-gray-700' },
+                        { label: 'Pending', value: stats.pending_orders || 0, color: 'text-yellow-600' },
+                        { label: 'Delivered', value: stats.delivered_orders || 0, color: 'text-green-600' },
+                        { label: 'Cancelled', value: stats.cancelled_orders || 0, color: 'text-red-600' },
+                        { label: 'Revenue', value: `₹${Number(stats.total_revenue || 0).toFixed(0)}`, color: 'text-primary-600' },
+                        { label: 'Avg Order', value: `₹${Number(stats.avg_order_value || 0).toFixed(0)}`, color: 'text-gray-700' },
+                    ].map(s => (
+                        <div key={s.label} className="bg-white border border-gray-100 rounded-lg px-4 py-2 shadow-sm">
+                            <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
+                            <p className="text-xs text-gray-400">{s.label}</p>
+                        </div>
+                    ))}
                 </div>
             )}
 
             {/* Status tabs */}
-            <div style={{
-                display: 'flex', gap: 8, marginBottom: 20, overflowX: 'auto', paddingBottom: 4,
-            }}>
-                {STATUS_TABS.map(tab => {
-                    const count = tab.key
-                        ? orders.filter(o => o.status === tab.key).length
-                        : orders.length
-                    const active = activeTab === tab.key
-
+            <div className="flex gap-1.5 flex-wrap">
+                {STATUS_TABS.map(s => {
+                    const count = counts[s] || 0
+                    const isActive = statusFilter === s
                     return (
                         <button
-                            key={tab.key}
-                            onClick={() => setActiveTab(tab.key)} // No API call — filters Redux store
-                            style={{
-                                padding: '8px 16px', borderRadius: 12, border: 'none', cursor: 'pointer',
-                                background: active ? '#1E40AF' : '#fff',
-                                color: active ? '#fff' : '#475569',
-                                fontWeight: active ? 700 : 500,
-                                fontSize: 13, whiteSpace: 'nowrap',
-                                boxShadow: active ? '0 2px 8px rgba(30,64,175,0.3)' : '0 1px 4px rgba(0,0,0,0.06)',
-                                display: 'flex', alignItems: 'center', gap: 6,
-                                transition: 'all 0.15s',
-                            }}
+                            key={s || 'all'}
+                            onClick={() => setStatusFilter(s)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 ${isActive
+                                    ? 'bg-primary-500 text-white'
+                                    : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
+                                }`}
                         >
-                            {tab.icon} {tab.label}
+                            {(s || 'all').replace(/_/g, ' ')}
                             {count > 0 && (
-                                <span style={{
-                                    background: active ? 'rgba(255,255,255,0.25)' : '#F1F5F9',
-                                    color: active ? '#fff' : '#64748B',
-                                    borderRadius: 20, padding: '1px 7px', fontSize: 11, fontWeight: 700,
-                                }}>
+                                <span className={`text-[10px] font-bold px-1.5 rounded-full ${isActive ? 'bg-white/20' : 'bg-gray-100'
+                                    }`}>
                                     {count}
                                 </span>
                             )}
@@ -472,45 +639,24 @@ export default function Orders() {
                 })}
             </div>
 
-            {/* Orders grid */}
-            {loading && orders.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: 60, color: '#94A3B8' }}>
-                    <div style={{ fontSize: 40, marginBottom: 12 }}>⏳</div>
-                    <div style={{ fontWeight: 600 }}>Loading orders...</div>
-                </div>
-            ) : filteredOrders.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: 60, color: '#94A3B8' }}>
-                    <div style={{ fontSize: 48, marginBottom: 12 }}>📭</div>
-                    <div style={{ fontWeight: 700, fontSize: 16, color: '#475569' }}>No orders found</div>
-                    <div style={{ fontSize: 13, marginTop: 4 }}>
-                        {activeTab ? `No ${activeTab.replace(/_/g, ' ')} orders` : 'No orders yet today'}
-                    </div>
-                </div>
-            ) : (
-                <div style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
-                    gap: 16,
-                }}>
-                    {filteredOrders.map(order => (
-                        <OrderCard
-                            key={order.id}
-                            order={order}
-                            onView={setSelected}
-                            onStatusUpdate={handleStatusUpdate}
-                            updating={updating}
-                        />
-                    ))}
-                </div>
-            )}
-
-            {/* Order detail modal */}
-            <OrderModal
-                order={selected}
-                onClose={() => setSelected(null)}
-                onStatusUpdate={handleStatusUpdate}
-                updating={updating}
+            <Grid
+                columns={columns}
+                data={filtered}
+                loading={loading}
+                emptyText="No orders match this filter."
+                onSearchChange={setSearch}
+                searchPlaceholder="Search by order #, customer, phone, driver..."
+                pageSize={15}
             />
+
+            {selectedId && (
+                <OrderDetailModal
+                    open={!!selectedId}
+                    onClose={() => setSelectedId(null)}
+                    orderId={selectedId}
+                    martId={martId}
+                />
+            )}
         </div>
     )
 }
