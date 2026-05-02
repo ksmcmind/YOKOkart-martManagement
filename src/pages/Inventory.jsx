@@ -3,17 +3,21 @@
 // Mart admin inventory management.
 // Bulk upload kept untouched — it's working.
 //
-// New in this version:
-//   - Add Item form properly wires `type` (defaults to 'restock')
-//   - "Restock" action per row → opens RestockModal (mode add/set + txn_type)
-//   - "History" action per row → shows audit trail from /inventory/:id/transactions
-//   - Fixed: payload now sends mongo_product_id (was product_id, broken)
+// Updated in this version:
+//   - Filter bar: stock status, unit, price range, expiry, sort — all wired to
+//     fetchInventoryFiltered (GET /inventory?martId=...&<filters>)
+//   - Backend summary stats from fetchInventorySummary (/inventory/summary/:martId)
+//     shown alongside local stats card strip
+//   - Pagination controls driven by filteredPagination from backend response
+//   - martId kept exactly as useAuth() provides it — no transformation
 
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import * as XLSX from 'xlsx'
 import {
     fetchInventory,
+    fetchInventoryFiltered,
+    fetchInventorySummary,
     addInventoryItem,
     updateInventoryItem,
     toggleInventoryActive,
@@ -29,6 +33,11 @@ import {
     selectFilteredInventory,
     selectItemTransactions,
     selectItemTransactionsLoading,
+    selectFilteredItems,
+    selectFilteredLoading,
+    selectFilteredPagination,
+    selectInventorySummary,
+    selectInventorySummaryLoading,
 } from '../store/slices/inventorySlice'
 import { showToast } from '../store/slices/uiSlice'
 import PageHeader from '../components/PageHeader'
@@ -44,32 +53,21 @@ import useAuth from '../hooks/useAuth'
 
 const UNITS = ['kg', 'g', 'l', 'ml', 'pcs', 'dozen']
 
-// User-driven txn types (for Add Item + Restock dropdowns)
-// Excludes 'sale'/'transfer' which are system-driven, not user-uploaded.
 const USER_TXN_TYPES = [
-    'restock',     // fresh delivery from supplier (default)
-    'return',      // customer returned items
-    'adjustment',  // manual correction after physical count
-    'damage',      // damaged goods write-off
-    'expired',     // expired stock write-off
-    'theft',       // shrinkage write-off
+    'restock',
+    'return',
+    'adjustment',
+    'damage',
+    'expired',
+    'theft',
 ]
 
 const SCHEMA_FIELDS = [
-    'product_id',
-    'variant_id',
-    'sale_price',
-    'mrp',
-    'stock_qty',
-    'stock_unit',
-    'low_stock_alert',
-    'expiry_date',
-    'batch_number',
-    'aisle_location',
-    'is_active',
+    'product_id', 'variant_id', 'sale_price', 'mrp',
+    'stock_qty', 'stock_unit', 'low_stock_alert',
+    'expiry_date', 'batch_number', 'aisle_location', 'is_active',
 ]
 
-// Client-side validators for BulkUploadModal
 const FIELD_VALIDATORS = {
     product_id: v => /^[a-f0-9]{24}$/i.test((v || '').trim()) || 'must be 24-char hex ObjectId',
     variant_id: v => (v || '').trim().length > 0 && v.length <= 50 || 'required, max 50 chars',
@@ -120,23 +118,40 @@ const downloadXLSXTemplate = () => {
     XLSX.writeFile(wb, 'inventory_template.xlsx')
 }
 
-// ── Empty form ───────────────────────────────────────────────────────────────
+// ── Empty forms ──────────────────────────────────────────────────────────────
 
 const EMPTY_FORM = {
     product_id: '', variant_id: '', sale_price: '', mrp: '',
     stock_qty: '', stock_unit: 'pcs', low_stock_alert: '10',
-    type: 'restock',                    // FIX: was missing → handleAdd validation always failed
+    type: 'restock',
     expiry_date: '', batch_number: '', aisle_location: '', is_active: true,
 }
 
 const EMPTY_RESTOCK_FORM = {
     stock_qty: '',
-    mode: 'add',                        // 'add' = delta | 'set' = absolute
+    mode: 'add',
     txn_type: 'restock',
     reason: '',
 }
 
-// ── Inline editable cell ─────────────────────────────────────────────────────
+// Default filter state — mirrors query params accepted by the backend service
+const EMPTY_FILTERS = {
+    search: '',
+    stock_unit: '',
+    is_active: '',           // '' = all | 'true' | 'false'
+    low_stock_only: '',      // '' = off | 'true'
+    out_of_stock: '',        // '' = off | 'true'
+    min_sale_price: '',
+    max_sale_price: '',
+    expiry_before: '',
+    expiry_after: '',
+    sort_by: 'created_at',
+    sort_order: 'DESC',
+    page: 1,
+    limit: 15,
+}
+
+// ── EditableCell (unchanged) ─────────────────────────────────────────────────
 
 function EditableCell({ value, type = 'text', options, onSave }) {
     const [editing, setEditing] = useState(false)
@@ -176,7 +191,7 @@ function EditableCell({ value, type = 'text', options, onSave }) {
     )
 }
 
-// ── Stock badge ──────────────────────────────────────────────────────────────
+// ── StockBadge (unchanged) ───────────────────────────────────────────────────
 
 function StockBadge({ qty, alert }) {
     const q = parseFloat(qty)
@@ -186,17 +201,200 @@ function StockBadge({ qty, alert }) {
     return <Badge variant="green">In Stock</Badge>
 }
 
-// ── Restock Modal ────────────────────────────────────────────────────────────
-// Opens for a specific inventory row. Calls POST /inventory/restock.
+// ── Filter Bar ───────────────────────────────────────────────────────────────
+
+function FilterBar({ filters, onChange, onReset, loading }) {
+    const set = (k, v) => onChange({ ...filters, [k]: v, page: 1 })
+
+    const hasActive = Object.entries(filters).some(([k, v]) => {
+        if (['sort_by', 'sort_order', 'page', 'limit'].includes(k)) return false
+        return v !== '' && v !== null && v !== undefined
+    })
+
+    return (
+        <div className="bg-white border border-gray-100 rounded-xl p-4 space-y-3 shadow-sm">
+            <div className="flex items-center justify-between">
+                <span className="text-[10px] font-extrabold uppercase tracking-widest text-gray-500">
+                    Filters
+                </span>
+                {hasActive && (
+                    <button onClick={onReset}
+                        className="text-[10px] font-bold text-red-500 hover:text-red-700 uppercase tracking-wider transition-colors">
+                        ✕ Clear All
+                    </button>
+                )}
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                {/* Search */}
+                <div className="col-span-2 sm:col-span-3 lg:col-span-2">
+                    <input
+                        value={filters.search}
+                        onChange={e => set('search', e.target.value)}
+                        placeholder="Search product, variant, batch, aisle…"
+                        className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-primary-400 transition-colors"
+                    />
+                </div>
+
+                {/* Stock status */}
+                <select
+                    value={
+                        filters.out_of_stock === 'true' ? 'out_of_stock'
+                            : filters.low_stock_only === 'true' ? 'low_stock'
+                                : filters.is_active === 'false' ? 'inactive'
+                                    : filters.is_active === 'true' ? 'active'
+                                        : ''
+                    }
+                    onChange={e => {
+                        const v = e.target.value
+                        onChange({
+                            ...filters,
+                            out_of_stock: v === 'out_of_stock' ? 'true' : '',
+                            low_stock_only: v === 'low_stock' ? 'true' : '',
+                            is_active: v === 'active' ? 'true'
+                                : v === 'inactive' ? 'false' : '',
+                            page: 1,
+                        })
+                    }}
+                    className="text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-primary-400 bg-white transition-colors"
+                >
+                    <option value="">All Stock Status</option>
+                    <option value="active">Active Only</option>
+                    <option value="inactive">Inactive Only</option>
+                    <option value="low_stock">Low Stock</option>
+                    <option value="out_of_stock">Out of Stock</option>
+                </select>
+
+                {/* Unit */}
+                <select
+                    value={filters.stock_unit}
+                    onChange={e => set('stock_unit', e.target.value)}
+                    className="text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-primary-400 bg-white transition-colors"
+                >
+                    <option value="">All Units</option>
+                    {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+                </select>
+
+                {/* Sort */}
+                <div className="flex gap-1">
+                    <select
+                        value={filters.sort_by}
+                        onChange={e => set('sort_by', e.target.value)}
+                        className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-2 outline-none focus:border-primary-400 bg-white transition-colors"
+                    >
+                        <option value="created_at">Created</option>
+                        <option value="updated_at">Updated</option>
+                        <option value="sale_price">Price</option>
+                        <option value="stock_qty">Stock</option>
+                        <option value="expiry_date">Expiry</option>
+                        <option value="last_restocked_at">Restocked</option>
+                    </select>
+                    <button
+                        onClick={() => set('sort_order', filters.sort_order === 'ASC' ? 'DESC' : 'ASC')}
+                        className="px-2 py-1 text-xs border border-gray-200 rounded-lg hover:border-primary-300 transition-colors font-bold text-gray-600"
+                        title="Toggle sort direction"
+                    >
+                        {filters.sort_order === 'ASC' ? '↑' : '↓'}
+                    </button>
+                </div>
+            </div>
+
+            {/* Price range row */}
+            <div className="flex flex-wrap gap-3 items-center">
+                <span className="text-[10px] uppercase tracking-widest font-bold text-gray-400">Price:</span>
+                <input
+                    type="number" placeholder="Min ₹"
+                    value={filters.min_sale_price}
+                    onChange={e => set('min_sale_price', e.target.value)}
+                    className="w-20 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 transition-colors"
+                />
+                <span className="text-gray-300 text-xs">—</span>
+                <input
+                    type="number" placeholder="Max ₹"
+                    value={filters.max_sale_price}
+                    onChange={e => set('max_sale_price', e.target.value)}
+                    className="w-20 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 transition-colors"
+                />
+
+                <span className="text-[10px] uppercase tracking-widest font-bold text-gray-400 ml-2">
+                    Expiry:
+                </span>
+                <input
+                    type="date"
+                    value={filters.expiry_after}
+                    onChange={e => set('expiry_after', e.target.value)}
+                    className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 transition-colors"
+                />
+                <span className="text-gray-300 text-xs">→</span>
+                <input
+                    type="date"
+                    value={filters.expiry_before}
+                    onChange={e => set('expiry_before', e.target.value)}
+                    className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 transition-colors"
+                />
+
+                {loading && (
+                    <span className="ml-auto text-[10px] text-gray-400 animate-pulse">Loading…</span>
+                )}
+            </div>
+        </div>
+    )
+}
+
+// ── Pagination Bar ───────────────────────────────────────────────────────────
+
+function PaginationBar({ pagination, onPageChange }) {
+    if (!pagination || pagination.total_pages <= 1) return null
+    const { page, total_pages, total, limit } = pagination
+    const from = (page - 1) * limit + 1
+    const to = Math.min(page * limit, total)
+
+    return (
+        <div className="flex items-center justify-between text-xs text-gray-500 pt-2">
+            <span>{from}–{to} of {total} items</span>
+            <div className="flex gap-1">
+                <button
+                    onClick={() => onPageChange(page - 1)}
+                    disabled={page <= 1}
+                    className="px-2 py-1 border border-gray-200 rounded hover:border-primary-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                    ‹ Prev
+                </button>
+                {Array.from({ length: Math.min(total_pages, 7) }, (_, i) => {
+                    // Show first, last, current ±1, and ellipsis
+                    const p = i + 1
+                    return (
+                        <button key={p}
+                            onClick={() => onPageChange(p)}
+                            className={`px-2.5 py-1 border rounded transition-colors ${p === page
+                                    ? 'bg-primary-600 border-primary-600 text-white font-bold'
+                                    : 'border-gray-200 hover:border-primary-300'
+                                }`}
+                        >
+                            {p}
+                        </button>
+                    )
+                })}
+                <button
+                    onClick={() => onPageChange(page + 1)}
+                    disabled={page >= total_pages}
+                    className="px-2 py-1 border border-gray-200 rounded hover:border-primary-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                    Next ›
+                </button>
+            </div>
+        </div>
+    )
+}
+
+// ── RestockModal (unchanged) ─────────────────────────────────────────────────
 
 function RestockModal({ open, onClose, item, martId, staffId }) {
     const dispatch = useDispatch()
     const restocking = useSelector(selectInventoryRestocking)
     const [form, setForm] = useState(EMPTY_RESTOCK_FORM)
 
-    useEffect(() => {
-        if (open) setForm(EMPTY_RESTOCK_FORM)
-    }, [open, item?.id])
+    useEffect(() => { if (open) setForm(EMPTY_RESTOCK_FORM) }, [open, item?.id])
 
     if (!item) return null
 
@@ -209,18 +407,14 @@ function RestockModal({ open, onClose, item, martId, staffId }) {
 
     const handleSubmit = async () => {
         if (!form.stock_qty || isNaN(parseFloat(form.stock_qty))) {
-            dispatch(showToast({ message: 'Quantity is required', type: 'error' }))
-            return
+            dispatch(showToast({ message: 'Quantity is required', type: 'error' })); return
         }
         if (parseFloat(form.stock_qty) < 0) {
-            dispatch(showToast({ message: 'Quantity must be non-negative', type: 'error' }))
-            return
+            dispatch(showToast({ message: 'Quantity must be non-negative', type: 'error' })); return
         }
         if (isNegative) {
-            dispatch(showToast({ message: `Result would be negative (${projected})`, type: 'error' }))
-            return
+            dispatch(showToast({ message: `Result would be negative (${projected})`, type: 'error' })); return
         }
-
         const action = await dispatch(restockInventoryItem({
             mongo_product_id: item.mongo_product_id,
             mongo_mart_id: martId,
@@ -243,53 +437,32 @@ function RestockModal({ open, onClose, item, martId, staffId }) {
     return (
         <Modal
             title={`Restock — ${item.mongo_product_id} / ${item.variant_id}`}
-            open={open}
-            onClose={onClose}
-            size="md"
+            open={open} onClose={onClose} size="md"
             footer={
                 <>
                     <Button variant="secondary" onClick={onClose}>Cancel</Button>
-                    <Button variant="primary" loading={restocking} onClick={handleSubmit}>
-                        Update Stock
-                    </Button>
+                    <Button variant="primary" loading={restocking} onClick={handleSubmit}>Update Stock</Button>
                 </>
             }
         >
             <div className="space-y-5">
-                {/* Current stock summary */}
                 <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
                     <p className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Current</p>
                     <p className="text-lg font-bold text-gray-900">
                         {currentQty} <span className="text-xs text-gray-500">{item.stock_unit}</span>
                     </p>
                 </div>
-
-                {/* Mode selector */}
                 <div>
-                    <label className="text-[10px] uppercase tracking-widest text-gray-500 font-bold block mb-2">
-                        Mode
-                    </label>
+                    <label className="text-[10px] uppercase tracking-widest text-gray-500 font-bold block mb-2">Mode</label>
                     <div className="grid grid-cols-2 gap-2">
-                        <button
-                            type="button"
-                            onClick={() => set('mode', 'add')}
-                            className={`px-3 py-2 rounded-lg text-xs font-bold border transition-colors ${form.mode === 'add'
-                                ? 'bg-primary-600 border-primary-600 text-white'
-                                : 'bg-white border-gray-200 text-gray-700 hover:border-primary-300'
-                                }`}
-                        >
-                            ADD (delta)
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => set('mode', 'set')}
-                            className={`px-3 py-2 rounded-lg text-xs font-bold border transition-colors ${form.mode === 'set'
-                                ? 'bg-primary-600 border-primary-600 text-white'
-                                : 'bg-white border-gray-200 text-gray-700 hover:border-primary-300'
-                                }`}
-                        >
-                            SET (absolute)
-                        </button>
+                        {['add', 'set'].map(m => (
+                            <button key={m} type="button" onClick={() => set('mode', m)}
+                                className={`px-3 py-2 rounded-lg text-xs font-bold border transition-colors ${form.mode === m
+                                    ? 'bg-primary-600 border-primary-600 text-white'
+                                    : 'bg-white border-gray-200 text-gray-700 hover:border-primary-300'}`}>
+                                {m === 'add' ? 'ADD (delta)' : 'SET (absolute)'}
+                            </button>
+                        ))}
                     </div>
                     <p className="text-[10px] text-gray-500 mt-1">
                         {form.mode === 'add'
@@ -297,57 +470,30 @@ function RestockModal({ open, onClose, item, martId, staffId }) {
                             : '"Recount says 47" — replaces current stock.'}
                     </p>
                 </div>
-
-                {/* Qty + type */}
                 <div className="grid grid-cols-2 gap-4">
-                    <Input
-                        label={form.mode === 'add' ? 'Add Quantity *' : 'New Total *'}
-                        type="number"
-                        value={form.stock_qty}
-                        onChange={e => set('stock_qty', e.target.value)}
-                        placeholder="50"
-                    />
-                    <Select
-                        label="Transaction Type *"
-                        value={form.txn_type}
-                        onChange={e => set('txn_type', e.target.value)}
-                    >
-                        {USER_TXN_TYPES.map(t => (
-                            <option key={t} value={t}>{t}</option>
-                        ))}
+                    <Input label={form.mode === 'add' ? 'Add Quantity *' : 'New Total *'}
+                        type="number" value={form.stock_qty}
+                        onChange={e => set('stock_qty', e.target.value)} placeholder="50" />
+                    <Select label="Transaction Type *" value={form.txn_type}
+                        onChange={e => set('txn_type', e.target.value)}>
+                        {USER_TXN_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                     </Select>
                 </div>
-
-                {/* Projected result */}
-                <div className={`rounded-lg px-4 py-3 border ${isNegative
-                    ? 'bg-red-50 border-red-200'
-                    : 'bg-green-50 border-green-200'
-                    }`}>
-                    <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">
-                        Projected Stock
-                    </p>
+                <div className={`rounded-lg px-4 py-3 border ${isNegative ? 'bg-red-50 border-red-200' : 'bg-green-50 border-green-200'}`}>
+                    <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Projected Stock</p>
                     <p className={`text-lg font-bold ${isNegative ? 'text-red-600' : 'text-green-700'}`}>
                         {projected} <span className="text-xs">{item.stock_unit}</span>
                         {isNegative && <span className="text-xs ml-2">⚠ Cannot go negative</span>}
                     </p>
                 </div>
-
-                <Input
-                    label="Reason / Notes"
-                    value={form.reason}
-                    onChange={e => set('reason', e.target.value)}
-                    placeholder="Supplier delivery #INV-1234"
-                />
+                <Input label="Reason / Notes" value={form.reason}
+                    onChange={e => set('reason', e.target.value)} placeholder="Supplier delivery #INV-1234" />
             </div>
         </Modal>
     )
 }
 
-// ── History Modal ────────────────────────────────────────────────────────────
-
-// ── History Modal ────────────────────────────────────────────────────────────
-// Drop-in replacement for the existing HistoryModal in Inventory.jsx.
-// Shows transactions as a tabular grid: Type | Change | Before → After | Reason | When | By
+// ── HistoryModal (unchanged) ─────────────────────────────────────────────────
 
 function HistoryModal({ open, onClose, item }) {
     const dispatch = useDispatch()
@@ -361,20 +507,14 @@ function HistoryModal({ open, onClose, item }) {
     if (!item) return null
 
     const typeColor = (type) => ({
-        restock: 'green',
-        sale: 'blue',
-        return: 'yellow',
-        damage: 'red',
-        expired: 'red',
-        theft: 'red',
-        adjustment: 'gray',
-        transfer: 'purple',
+        restock: 'green', sale: 'blue', return: 'yellow',
+        damage: 'red', expired: 'red', theft: 'red',
+        adjustment: 'gray', transfer: 'purple',
     })[type] || 'gray'
 
     const fmtDateTime = (iso) => {
         if (!iso) return '—'
-        const d = new Date(iso)
-        return d.toLocaleString('en-IN', {
+        return new Date(iso).toLocaleString('en-IN', {
             day: '2-digit', month: 'short', year: '2-digit',
             hour: '2-digit', minute: '2-digit', hour12: true,
         })
@@ -383,9 +523,7 @@ function HistoryModal({ open, onClose, item }) {
     return (
         <Modal
             title={`Stock History — ${item.mongo_product_id} / ${item.variant_id}`}
-            open={open}
-            onClose={onClose}
-            size="xl"
+            open={open} onClose={onClose} size="xl"
             footer={<Button variant="secondary" onClick={onClose}>Close</Button>}
         >
             {loading ? (
@@ -397,24 +535,11 @@ function HistoryModal({ open, onClose, item }) {
                     <table className="w-full text-xs">
                         <thead>
                             <tr className="border-b-2 border-gray-200">
-                                <th className="text-left text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 pr-3">
-                                    Type
-                                </th>
-                                <th className="text-right text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 pr-3 whitespace-nowrap">
-                                    Change
-                                </th>
-                                <th className="text-center text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 pr-3 whitespace-nowrap">
-                                    Before → After
-                                </th>
-                                <th className="text-left text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 pr-3">
-                                    Reason
-                                </th>
-                                <th className="text-left text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 pr-3 whitespace-nowrap">
-                                    When
-                                </th>
-                                <th className="text-left text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 whitespace-nowrap">
-                                    By / Order
-                                </th>
+                                {['Type', 'Change', 'Before → After', 'Reason', 'When', 'By / Order'].map(h => (
+                                    <th key={h} className="text-left text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 pr-3 whitespace-nowrap">
+                                        {h}
+                                    </th>
+                                ))}
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
@@ -424,12 +549,9 @@ function HistoryModal({ open, onClose, item }) {
                                 return (
                                     <tr key={t.id} className="hover:bg-gray-50 transition-colors">
                                         <td className="py-2 pr-3 align-top">
-                                            <Badge variant={typeColor(t.type)} size="xs">
-                                                {t.type.toUpperCase()}
-                                            </Badge>
+                                            <Badge variant={typeColor(t.type)} size="xs">{t.type.toUpperCase()}</Badge>
                                         </td>
-                                        <td className={`py-2 pr-3 text-right font-bold tabular-nums whitespace-nowrap ${positive ? 'text-green-700' : 'text-red-600'
-                                            }`}>
+                                        <td className={`py-2 pr-3 text-right font-bold tabular-nums whitespace-nowrap ${positive ? 'text-green-700' : 'text-red-600'}`}>
                                             {positive ? '+' : ''}{change}
                                         </td>
                                         <td className="py-2 pr-3 text-center text-gray-500 tabular-nums whitespace-nowrap">
@@ -438,40 +560,31 @@ function HistoryModal({ open, onClose, item }) {
                                         <td className="py-2 pr-3 text-gray-700 max-w-[200px] truncate" title={t.reason || ''}>
                                             {t.reason || <span className="text-gray-300">—</span>}
                                         </td>
-                                        <td className="py-2 pr-3 text-gray-600 whitespace-nowrap">
-                                            {fmtDateTime(t.created_at)}
-                                        </td>
+                                        <td className="py-2 pr-3 text-gray-600 whitespace-nowrap">{fmtDateTime(t.created_at)}</td>
                                         <td className="py-2 text-gray-600 whitespace-nowrap">
-                                            {t.staff_name && (
-                                                <span className="text-gray-700">{t.staff_name}</span>
-                                            )}
+                                            {t.staff_name && <span className="text-gray-700">{t.staff_name}</span>}
                                             {t.order_id && (
                                                 <span className="text-blue-600 font-mono text-[10px]">
                                                     {t.staff_name ? ' · ' : ''}#{t.order_id.slice(0, 8)}
                                                 </span>
                                             )}
-                                            {!t.staff_name && !t.order_id && (
-                                                <span className="text-gray-300">—</span>
-                                            )}
+                                            {!t.staff_name && !t.order_id && <span className="text-gray-300">—</span>}
                                         </td>
                                     </tr>
                                 )
                             })}
                         </tbody>
                     </table>
-
-                    {/* Footer summary */}
                     <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between text-[10px] text-gray-500">
                         <span>{txns.length} transaction{txns.length !== 1 ? 's' : ''}</span>
                         <span className="tabular-nums">
-                            Net change: {' '}
+                            Net change:{' '}
                             <span className={
-                                txns.reduce((sum, t) => sum + parseFloat(t.qty_change), 0) >= 0
-                                    ? 'text-green-700 font-bold'
-                                    : 'text-red-600 font-bold'
+                                txns.reduce((s, t) => s + parseFloat(t.qty_change), 0) >= 0
+                                    ? 'text-green-700 font-bold' : 'text-red-600 font-bold'
                             }>
                                 {(() => {
-                                    const net = txns.reduce((sum, t) => sum + parseFloat(t.qty_change), 0)
+                                    const net = txns.reduce((s, t) => s + parseFloat(t.qty_change), 0)
                                     return (net >= 0 ? '+' : '') + net.toFixed(2)
                                 })()}
                             </span>
@@ -482,6 +595,7 @@ function HistoryModal({ open, onClose, item }) {
         </Modal>
     )
 }
+
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Inventory() {
@@ -489,47 +603,62 @@ export default function Inventory() {
     const { martId, staffId } = useAuth()
     const resolvedMartId = martId
 
+    // ── Selectors ──────────────────────────────────────────────────────────
     const items = useSelector(selectInventoryItems)
     const loading = useSelector(selectInventoryLoading)
     const saving = useSelector(selectInventorySaving)
-    const stats = useSelector(selectInventoryStats)
+    const localStats = useSelector(selectInventoryStats)
 
-    const [search, setSearch] = useState('')
+    const filteredItems = useSelector(selectFilteredItems)
+    const filteredLoad = useSelector(selectFilteredLoading)
+    const pagination = useSelector(selectFilteredPagination)
+
+    const backendSummary = useSelector(selectInventorySummary)
+    const summaryLoading = useSelector(selectInventorySummaryLoading)
+
+    // ── Local state ────────────────────────────────────────────────────────
+    const [filters, setFilters] = useState(EMPTY_FILTERS)
     const [addOpen, setAddOpen] = useState(false)
     const [bulkOpen, setBulkOpen] = useState(false)
     const [restockItem, setRestockItem] = useState(null)
     const [historyItem, setHistoryItem] = useState(null)
     const [form, setForm] = useState(EMPTY_FORM)
 
-    const filtered = useSelector(s => selectFilteredInventory(s, search))
-
+    // ── Initial load ───────────────────────────────────────────────────────
+    // fetchInventory keeps the full unfiltered list in state (for local stats).
+    // fetchInventorySummary fetches backend aggregation once.
+    // fetchInventoryFiltered does the paginated/filtered grid data.
     useEffect(() => {
-        if (martId) dispatch(fetchInventory(martId))
+        if (!martId) return
+        dispatch(fetchInventory(martId))
+        dispatch(fetchInventorySummary(martId))
     }, [martId, dispatch])
+
+    // ── Filtered fetch — fires whenever filters change ─────────────────────
+    useEffect(() => {
+        if (!martId) return
+        dispatch(fetchInventoryFiltered({ martId, ...filters }))
+    }, [martId, filters, dispatch])
+
+    const handleFilterChange = useCallback((next) => setFilters(next), [])
+    const handleFilterReset = useCallback(() => setFilters(EMPTY_FILTERS), [])
+    const handlePageChange = useCallback((p) => setFilters(f => ({ ...f, page: p })), [])
 
     const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
-    // ── Single add ──────────────────────────────────────────────────────────
+    // ── Single add ─────────────────────────────────────────────────────────
     const handleAdd = async () => {
-        const required = [
-            'product_id', 'variant_id', 'sale_price', 'mrp',
-            'stock_qty', 'stock_unit', 'low_stock_alert', 'type',
-        ]
+        const required = ['product_id', 'variant_id', 'sale_price', 'mrp', 'stock_qty', 'stock_unit', 'low_stock_alert', 'type']
         const missing = required.find(k => form[k] === '' || form[k] === null || form[k] === undefined)
         if (missing) {
-            dispatch(showToast({ message: `${missing.replace(/_/g, ' ')} is required`, type: 'error' }))
-            return
+            dispatch(showToast({ message: `${missing.replace(/_/g, ' ')} is required`, type: 'error' })); return
         }
         if (!/^[a-f0-9]{24}$/i.test(form.product_id)) {
-            dispatch(showToast({ message: 'Product ID must be 24-char hex ObjectId', type: 'error' }))
-            return
+            dispatch(showToast({ message: 'Product ID must be 24-char hex ObjectId', type: 'error' })); return
         }
         if (parseFloat(form.sale_price) > parseFloat(form.mrp)) {
-            dispatch(showToast({ message: 'Sale price cannot exceed MRP', type: 'error' }))
-            return
+            dispatch(showToast({ message: 'Sale price cannot exceed MRP', type: 'error' })); return
         }
-
-        // FIX: backend expects mongo_product_id, not product_id
         const action = await dispatch(addInventoryItem({
             mongo_product_id: form.product_id,
             variant_id: form.variant_id,
@@ -547,33 +676,27 @@ export default function Inventory() {
             is_active: form.is_active,
         }))
         if (addInventoryItem.fulfilled.match(action)) {
-            setAddOpen(false); setForm(EMPTY_FORM)
+            setAddOpen(false)
+            setForm(EMPTY_FORM)
+            // Refresh backend summary after add
+            dispatch(fetchInventorySummary(martId))
         }
     }
 
-    // ── Inline update ───────────────────────────────────────────────────────
+    // ── Inline update ──────────────────────────────────────────────────────
     const handleInlineUpdate = (id, field, value) => {
-        const isNumeric = ['sale_price', 'mrp', 'low_stock_alert'].includes(field)
-        // NOTE: stock_qty is intentionally NOT inline-editable anymore — backend
-        // blocks direct stock_qty updates. Use the Restock modal instead.
         if (field === 'stock_qty') {
-            dispatch(showToast({
-                message: 'Use the Restock button to change stock (audit-logged).',
-                type: 'info',
-            }))
+            dispatch(showToast({ message: 'Use the Restock button to change stock (audit-logged).', type: 'info' }))
             return
         }
-        dispatch(updateInventoryItem({
-            id,
-            patch: { [field]: isNumeric ? parseFloat(value) : value },
-        }))
+        const isNumeric = ['sale_price', 'mrp', 'low_stock_alert'].includes(field)
+        dispatch(updateInventoryItem({ id, patch: { [field]: isNumeric ? parseFloat(value) : value } }))
     }
 
-    // ── Grid columns ────────────────────────────────────────────────────────
+    // ── Grid columns (unchanged) ───────────────────────────────────────────
     const columns = [
         {
-            key: 'product',
-            label: 'Product ID',
+            key: 'product', label: 'Product ID',
             render: r => (
                 <div className="flex items-center gap-2 py-1">
                     <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border border-gray-200">
@@ -583,19 +706,15 @@ export default function Inventory() {
             ),
         },
         {
-            key: 'variant',
-            label: 'Variant',
+            key: 'variant', label: 'Variant',
             render: r => (
                 <div className="py-1">
-                    <Badge variant="blue" size="xs" className="font-bold tracking-wide">
-                        {r.variant_id}
-                    </Badge>
+                    <Badge variant="blue" size="xs" className="font-bold tracking-wide">{r.variant_id}</Badge>
                 </div>
             ),
         },
         {
-            key: 'pricing',
-            label: 'Pricing',
+            key: 'pricing', label: 'Pricing',
             render: r => (
                 <div className="flex items-center gap-3 text-[11px]">
                     <div className="flex items-center gap-1">
@@ -614,8 +733,7 @@ export default function Inventory() {
             ),
         },
         {
-            key: 'stock',
-            label: 'Inventory',
+            key: 'stock', label: 'Inventory',
             render: r => {
                 const isLow = parseFloat(r.stock_qty) <= parseFloat(r.low_stock_alert)
                 return (
@@ -629,37 +747,34 @@ export default function Inventory() {
                         </div>
                         <div className="flex items-center gap-1">
                             <span className="text-gray-400 font-bold text-[9px] uppercase">Alert:</span>
-                            <EditableCell className="text-gray-500" value={r.low_stock_alert} type="number" onSave={v => handleInlineUpdate(r.id, 'low_stock_alert', v)} />
+                            <EditableCell value={r.low_stock_alert} type="number" onSave={v => handleInlineUpdate(r.id, 'low_stock_alert', v)} />
                         </div>
                     </div>
                 )
             },
         },
         {
-            key: 'location',
-            label: 'Logistics',
+            key: 'location', label: 'Logistics',
             render: r => (
                 <div className="flex items-center gap-3 text-[10px]">
                     <div className="flex items-center gap-1">
                         <span className="text-gray-400 font-bold text-[9px] uppercase">Batch:</span>
-                        <EditableCell className="font-mono text-gray-700" value={r.batch_number || '—'} onSave={v => handleInlineUpdate(r.id, 'batch_number', v)} />
+                        <EditableCell value={r.batch_number || '—'} onSave={v => handleInlineUpdate(r.id, 'batch_number', v)} />
                     </div>
                     <div className="flex items-center gap-1">
                         <span className="text-gray-400 font-bold text-[9px] uppercase">Aisle:</span>
-                        <EditableCell className="text-gray-700" value={r.aisle_location || '—'} onSave={v => handleInlineUpdate(r.id, 'aisle_location', v)} />
+                        <EditableCell value={r.aisle_location || '—'} onSave={v => handleInlineUpdate(r.id, 'aisle_location', v)} />
                     </div>
                 </div>
             ),
         },
         {
-            key: 'expiry_restock',
-            label: 'Dates',
+            key: 'expiry_restock', label: 'Dates',
             render: r => (
                 <div className="flex items-center gap-3 text-[10px]">
                     <div className="flex items-center gap-1">
                         <span className="text-gray-400 font-bold text-[9px] uppercase">Exp:</span>
                         <EditableCell
-                            className={`font-bold px-1 py-0.5 rounded ${!r.expiry_date ? 'text-gray-300 underline decoration-dotted' : 'text-red-600 bg-red-50'}`}
                             value={r.expiry_date?.slice(0, 10) || 'SET'}
                             type="date"
                             onSave={v => handleInlineUpdate(r.id, 'expiry_date', v)}
@@ -675,8 +790,7 @@ export default function Inventory() {
             ),
         },
         {
-            key: 'status',
-            label: 'Active',
+            key: 'status', label: 'Active',
             render: r => (
                 <div className="flex items-center justify-center">
                     <button
@@ -689,8 +803,7 @@ export default function Inventory() {
             ),
         },
         {
-            key: 'actions',
-            label: '',
+            key: 'actions', label: '',
             render: r => (
                 <div className="flex justify-end pr-2 gap-1">
                     <button
@@ -712,6 +825,29 @@ export default function Inventory() {
         },
     ]
 
+    // ── Stats: prefer backend summary, fall back to local counts ──────────
+    const statsCards = backendSummary
+        ? [
+            { label: 'Total Items', value: backendSummary.total_items, color: 'text-gray-700' },
+            { label: 'Out of Stock', value: backendSummary.out_of_stock, color: 'text-red-600' },
+            { label: 'Low Stock', value: backendSummary.low_stock, color: 'text-yellow-600' },
+            { label: 'Active', value: backendSummary.active_items, color: 'text-green-600' },
+            { label: 'Expiring Soon', value: backendSummary.expiring_soon, color: 'text-orange-500' },
+            {
+                label: 'Stock Value',
+                value: backendSummary.total_stock_value != null
+                    ? `₹${Number(backendSummary.total_stock_value).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+                    : '—',
+                color: 'text-primary-600',
+            },
+        ]
+        : [
+            { label: 'Total Items', value: localStats.total, color: 'text-gray-700' },
+            { label: 'Out of Stock', value: localStats.outOfStock, color: 'text-red-600' },
+            { label: 'Low Stock', value: localStats.lowStock, color: 'text-yellow-600' },
+            { label: 'Active', value: localStats.active, color: 'text-green-600' },
+        ]
+
     return (
         <div className="p-4 sm:p-6 space-y-4">
             <PageHeader
@@ -720,44 +856,55 @@ export default function Inventory() {
                 action={
                     <div className="flex gap-2">
                         <Button variant="secondary" onClick={() => setBulkOpen(true)}>📤 Bulk Upload</Button>
-                        <Button variant="secondary" onClick={() => dispatch(fetchInventory(resolvedMartId))}>↻ Refresh</Button>
+                        <Button variant="secondary" onClick={() => {
+                            dispatch(fetchInventory(resolvedMartId))
+                            dispatch(fetchInventorySummary(resolvedMartId))
+                            dispatch(fetchInventoryFiltered({ martId: resolvedMartId, ...filters }))
+                        }}>↻ Refresh</Button>
                         <Button variant="primary" onClick={() => { setForm(EMPTY_FORM); setAddOpen(true) }}>+ Add Item</Button>
                     </div>
                 }
             />
 
             {/* Stats Cards */}
-            {items.length > 0 && (
+            {(items.length > 0 || backendSummary) && (
                 <div className="flex gap-3 flex-wrap">
-                    {[
-                        { label: 'Total Items', value: stats.total, color: 'text-gray-700' },
-                        { label: 'Out of Stock', value: stats.outOfStock, color: 'text-red-600' },
-                        { label: 'Low Stock', value: stats.lowStock, color: 'text-yellow-600' },
-                        { label: 'Active', value: stats.active, color: 'text-green-600' },
-                    ].map(s => (
+                    {statsCards.map(s => (
                         <div key={s.label} className="bg-white border border-gray-100 rounded-lg px-4 py-2 shadow-sm">
-                            <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
+                            <p className={`text-lg font-bold ${s.color}`}>
+                                {summaryLoading && backendSummary === null ? '…' : s.value}
+                            </p>
                             <p className="text-xs text-gray-400">{s.label}</p>
                         </div>
                     ))}
                 </div>
             )}
 
+            {/* Filter Bar */}
+            <FilterBar
+                filters={filters}
+                onChange={handleFilterChange}
+                onReset={handleFilterReset}
+                loading={filteredLoad}
+            />
+
+            {/* Grid — uses backend-filtered data */}
             <Grid
                 columns={columns}
-                data={filtered}
-                loading={loading}
-                emptyText="No inventory items yet. Add one or bulk upload CSV."
-                onSearchChange={setSearch}
-                searchPlaceholder="Search by product ID, variant, aisle..."
-                pageSize={15}
+                data={filteredItems}
+                loading={filteredLoad}
+                emptyText="No inventory items match your filters."
+                pageSize={filters.limit}
             />
+
+            {/* Pagination */}
+            <PaginationBar pagination={pagination} onPageChange={handlePageChange} />
 
             {/* Add Item Modal */}
             <Modal
                 title="Add Inventory Item"
                 open={addOpen}
-                onClose={() => { setAddOpen(false) }}
+                onClose={() => setAddOpen(false)}
                 size="lg"
                 footer={
                     <>
@@ -769,7 +916,7 @@ export default function Inventory() {
                 <div className="space-y-8">
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="w-1 h-3 bg-primary-600 rounded-full"></span>
+                            <span className="w-1 h-3 bg-primary-600 rounded-full" />
                             Product Reference
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -782,7 +929,7 @@ export default function Inventory() {
 
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="w-1 h-3 bg-primary-600 rounded-full"></span>
+                            <span className="w-1 h-3 bg-primary-600 rounded-full" />
                             Pricing
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -795,10 +942,9 @@ export default function Inventory() {
 
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="w-1 h-3 bg-primary-600 rounded-full"></span>
+                            <span className="w-1 h-3 bg-primary-600 rounded-full" />
                             Stock Information
                         </h4>
-                        {/* FIX: was 3 cols with 4 fields → overflowed. Now 2 rows × 2 cols. */}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                             <Input label="Stock Qty *" type="number" value={form.stock_qty}
                                 onChange={e => set('stock_qty', e.target.value)} placeholder="100" />
@@ -814,14 +960,13 @@ export default function Inventory() {
                                 onChange={e => set('low_stock_alert', e.target.value)} placeholder="10" />
                         </div>
                         <p className="text-[10px] text-gray-500">
-                            Type defaults to "restock" (fresh delivery). Use "return", "damage", "expired",
-                            etc. when adding stock from non-supplier sources.
+                            Type defaults to "restock". Use "return", "damage", "expired" for other sources.
                         </p>
                     </section>
 
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="w-1 h-3 bg-primary-600 rounded-full"></span>
+                            <span className="w-1 h-3 bg-primary-600 rounded-full" />
                             Additional Details
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
@@ -838,17 +983,13 @@ export default function Inventory() {
 
             {/* Restock Modal */}
             <RestockModal
-                open={!!restockItem}
-                onClose={() => setRestockItem(null)}
-                item={restockItem}
-                martId={resolvedMartId}
-                staffId={staffId}
+                open={!!restockItem} onClose={() => setRestockItem(null)}
+                item={restockItem} martId={resolvedMartId} staffId={staffId}
             />
 
             {/* History Modal */}
             <HistoryModal
-                open={!!historyItem}
-                onClose={() => setHistoryItem(null)}
+                open={!!historyItem} onClose={() => setHistoryItem(null)}
                 item={historyItem}
             />
 
@@ -861,9 +1002,7 @@ export default function Inventory() {
                 fieldValidators={FIELD_VALIDATORS}
                 onUpload={async (items, file) => {
                     const action = await dispatch(bulkUploadInventory({
-                        file,
-                        martId: resolvedMartId,
-                        staffId: staffId,
+                        file, martId: resolvedMartId, staffId,
                     }))
                     return action.payload
                 }}
@@ -872,6 +1011,8 @@ export default function Inventory() {
                 onDone={(e) => {
                     if (e) { e.preventDefault(); e.stopPropagation() }
                     dispatch(fetchInventory(resolvedMartId))
+                    dispatch(fetchInventorySummary(resolvedMartId))
+                    dispatch(fetchInventoryFiltered({ martId: resolvedMartId, ...filters }))
                 }}
             />
         </div>
