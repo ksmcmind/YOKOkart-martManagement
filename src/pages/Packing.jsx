@@ -22,10 +22,10 @@ export default function Packing() {
     useEffect(() => { load() }, [martId])
 
     // Auto refresh every 15 seconds
-    useEffect(() => {
-        const t = setInterval(load, 15000)
-        return () => clearInterval(t)
-    }, [martId])
+    // useEffect(() => {
+    //     const t = setInterval(load, 15000)
+    //     return () => clearInterval(t)
+    // }, [martId])
 
     const markPreparing = async (orderId) => {
         const res = await dispatch(updateOrderStatus({ orderId, status: 'preparing' }))

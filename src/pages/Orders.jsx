@@ -436,10 +436,10 @@ export default function Orders() {
     useEffect(() => { load() }, [martId, statusFilter])
 
     // Auto-refresh every 30s
-    useEffect(() => {
-        const t = setInterval(load, 30000)
-        return () => clearInterval(t)
-    }, [martId, statusFilter])
+    // useEffect(() => {
+    //     const t = setInterval(load, 30000)
+    //     return () => clearInterval(t)
+    // }, [martId, statusFilter])
 
     // Client-side search filter (over already-fetched list)
     const filtered = useMemo(() => {
@@ -623,8 +623,8 @@ export default function Orders() {
                             key={s || 'all'}
                             onClick={() => setStatusFilter(s)}
                             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 ${isActive
-                                    ? 'bg-primary-500 text-white'
-                                    : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
+                                ? 'bg-primary-500 text-white'
+                                : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
                                 }`}
                         >
                             {(s || 'all').replace(/_/g, ' ')}

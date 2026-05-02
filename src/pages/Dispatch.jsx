@@ -49,10 +49,10 @@ export default function Dispatch() {
     }, [martId])
 
     // Auto refresh every 20 seconds
-    useEffect(() => {
-        const t = setInterval(load, 20000)
-        return () => clearInterval(t)
-    }, [martId])
+    // useEffect(() => {
+    //     // const t = setInterval(load, 20000)
+    //     return () => clearInterval(t)
+    // }, [martId])
 
     const handleConfirm = async (orderId) => {
         await dispatch(updateOrderStatus({ orderId, status: 'confirmed' }))

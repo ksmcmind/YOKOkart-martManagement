@@ -1,15 +1,11 @@
 // src/pages/Inventory.jsx
 //
-// Mart admin inventory management.
-// Bulk upload kept untouched — it's working.
-//
-// Updated in this version:
-//   - Filter bar: stock status, unit, price range, expiry, sort — all wired to
-//     fetchInventoryFiltered (GET /inventory?martId=...&<filters>)
-//   - Backend summary stats from fetchInventorySummary (/inventory/summary/:martId)
-//     shown alongside local stats card strip
-//   - Pagination controls driven by filteredPagination from backend response
-//   - martId kept exactly as useAuth() provides it — no transformation
+// Fixed in this version:
+//   - fetchInventoryFiltered now hits /inventory/filters (was /inventory — wrong endpoint)
+//   - FilterBar uses local draft state; API fires only on "Search" click or Enter
+//   - Inventory grid has backend-driven pagination (PaginationBar)
+//   - Filter bar redesigned: pill-style active filter chips, cleaner layout
+//   - martId forwarded correctly as ?martId= (controller accepts both cases)
 
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
@@ -30,14 +26,13 @@ import {
     selectInventorySaving,
     selectInventoryRestocking,
     selectInventoryStats,
-    selectFilteredInventory,
-    selectItemTransactions,
-    selectItemTransactionsLoading,
     selectFilteredItems,
     selectFilteredLoading,
     selectFilteredPagination,
     selectInventorySummary,
     selectInventorySummaryLoading,
+    selectItemTransactions,
+    selectItemTransactionsLoading,
 } from '../store/slices/inventorySlice'
 import { showToast } from '../store/slices/uiSlice'
 import PageHeader from '../components/PageHeader'
@@ -53,14 +48,7 @@ import useAuth from '../hooks/useAuth'
 
 const UNITS = ['kg', 'g', 'l', 'ml', 'pcs', 'dozen']
 
-const USER_TXN_TYPES = [
-    'restock',
-    'return',
-    'adjustment',
-    'damage',
-    'expired',
-    'theft',
-]
+const USER_TXN_TYPES = ['restock', 'return', 'adjustment', 'damage', 'expired', 'theft']
 
 const SCHEMA_FIELDS = [
     'product_id', 'variant_id', 'sale_price', 'mrp',
@@ -82,7 +70,7 @@ const FIELD_VALIDATORS = {
     is_active: v => ['true', 'false'].includes((v || '').toLowerCase().trim()) || 'must be "true" or "false"',
 }
 
-// ── Template generators (UNCHANGED — bulk upload working) ────────────────────
+// ── Template generators ───────────────────────────────────────────────────────
 
 const SAMPLE_ROW = [
     '64f1a2b3c4d5e6f7a8b9c0d1', 'VID-AMUL-500', '49.00', '55.00',
@@ -98,7 +86,7 @@ const downloadCSVTemplate = () => {
         '# Inventory Bulk Upload — CSV Template',
         '# mongo_mart_id is NOT in this CSV — backend fills it from your session.',
         '# stock_unit: kg | g | l | ml | pcs | dozen',
-        '# Dates: YYYY-MM-DD format. Leave empty for: expiry_date, batch_number, aisle_location.',
+        '# Dates: YYYY-MM-DD format.',
         '',
     ]
     const header = SCHEMA_FIELDS.join(',')
@@ -118,7 +106,7 @@ const downloadXLSXTemplate = () => {
     XLSX.writeFile(wb, 'inventory_template.xlsx')
 }
 
-// ── Empty forms ──────────────────────────────────────────────────────────────
+// ── Empty forms ───────────────────────────────────────────────────────────────
 
 const EMPTY_FORM = {
     product_id: '', variant_id: '', sale_price: '', mrp: '',
@@ -127,20 +115,14 @@ const EMPTY_FORM = {
     expiry_date: '', batch_number: '', aisle_location: '', is_active: true,
 }
 
-const EMPTY_RESTOCK_FORM = {
-    stock_qty: '',
-    mode: 'add',
-    txn_type: 'restock',
-    reason: '',
-}
+const EMPTY_RESTOCK_FORM = { stock_qty: '', mode: 'add', txn_type: 'restock', reason: '' }
 
-// Default filter state — mirrors query params accepted by the backend service
 const EMPTY_FILTERS = {
     search: '',
     stock_unit: '',
-    is_active: '',           // '' = all | 'true' | 'false'
-    low_stock_only: '',      // '' = off | 'true'
-    out_of_stock: '',        // '' = off | 'true'
+    is_active: '',
+    low_stock_only: '',
+    out_of_stock: '',
     min_sale_price: '',
     max_sale_price: '',
     expiry_before: '',
@@ -151,7 +133,7 @@ const EMPTY_FILTERS = {
     limit: 15,
 }
 
-// ── EditableCell (unchanged) ─────────────────────────────────────────────────
+// ── EditableCell ──────────────────────────────────────────────────────────────
 
 function EditableCell({ value, type = 'text', options, onSave }) {
     const [editing, setEditing] = useState(false)
@@ -181,7 +163,6 @@ function EditableCell({ value, type = 'text', options, onSave }) {
                 className="w-full text-xs border border-primary-400 rounded px-1 py-0.5 bg-white outline-none" />
         )
     }
-
     return (
         <span onClick={() => setEditing(true)}
             className="cursor-pointer hover:bg-primary-50 hover:text-primary-700 px-1 py-0.5 rounded transition-colors block w-full text-xs"
@@ -191,157 +172,315 @@ function EditableCell({ value, type = 'text', options, onSave }) {
     )
 }
 
-// ── StockBadge (unchanged) ───────────────────────────────────────────────────
+// ── FilterBar ─────────────────────────────────────────────────────────────────
 
-function StockBadge({ qty, alert }) {
-    const q = parseFloat(qty)
-    const a = parseFloat(alert)
-    if (q <= 0) return <Badge variant="red">Out of Stock</Badge>
-    if (q <= a) return <Badge variant="yellow">Low Stock</Badge>
-    return <Badge variant="green">In Stock</Badge>
+const SORT_OPTIONS = [
+    { value: 'created_at', label: 'Date Created' },
+    { value: 'updated_at', label: 'Last Updated' },
+    { value: 'sale_price', label: 'Price' },
+    { value: 'stock_qty', label: 'Stock Qty' },
+    { value: 'expiry_date', label: 'Expiry Date' },
+    { value: 'last_restocked_at', label: 'Last Restocked' },
+]
+
+const STOCK_STATUS_OPTIONS = [
+    { value: '', label: 'All Items' },
+    { value: 'active', label: 'Active' },
+    { value: 'inactive', label: 'Inactive' },
+    { value: 'low_stock', label: 'Low Stock' },
+    { value: 'out_of_stock', label: 'Out of Stock' },
+]
+
+function getStockStatusValue(draft) {
+    if (draft.out_of_stock === 'true') return 'out_of_stock'
+    if (draft.low_stock_only === 'true') return 'low_stock'
+    if (draft.is_active === 'false') return 'inactive'
+    if (draft.is_active === 'true') return 'active'
+    return ''
 }
 
-// ── Filter Bar ───────────────────────────────────────────────────────────────
+function getActiveChips(filters) {
+    const chips = []
+    if (filters.search) chips.push({ key: 'search', label: `"${filters.search}"` })
+    if (filters.stock_unit) chips.push({ key: 'stock_unit', label: `Unit: ${filters.stock_unit}` })
+    const sv = getStockStatusValue(filters)
+    if (sv) chips.push({ key: 'status', label: STOCK_STATUS_OPTIONS.find(o => o.value === sv)?.label || sv })
+    if (filters.min_sale_price || filters.max_sale_price) {
+        chips.push({
+            key: 'price',
+            label: `₹${filters.min_sale_price || '0'} – ₹${filters.max_sale_price || '∞'}`,
+        })
+    }
+    if (filters.expiry_after || filters.expiry_before) {
+        const parts = []
+        if (filters.expiry_after) parts.push(`from ${filters.expiry_after}`)
+        if (filters.expiry_before) parts.push(`to ${filters.expiry_before}`)
+        chips.push({ key: 'expiry', label: `Expiry ${parts.join(' ')}` })
+    }
+    return chips
+}
 
-function FilterBar({ filters, onChange, onReset, loading }) {
-    const set = (k, v) => onChange({ ...filters, [k]: v, page: 1 })
+function FilterBar({ filters, onSearch, onReset, loading }) {
+    const [draft, setDraft] = useState(filters)
+    const [expanded, setExpanded] = useState(false)
 
-    const hasActive = Object.entries(filters).some(([k, v]) => {
-        if (['sort_by', 'sort_order', 'page', 'limit'].includes(k)) return false
-        return v !== '' && v !== null && v !== undefined
-    })
+    useEffect(() => { setDraft(filters) }, [filters])
+
+    const set = (k, v) => setDraft(f => ({ ...f, [k]: v }))
+
+    const handleSearch = () => onSearch({ ...draft, page: 1 })
+    const handleReset = () => { setDraft(EMPTY_FILTERS); onReset() }
+    const handleKeyDown = e => { if (e.key === 'Enter') handleSearch() }
+
+    const activeChips = getActiveChips(filters)   // chips from *committed* filters
+    const stockStatusVal = getStockStatusValue(draft) // reflects draft for button highlighting
+
+    const setStockStatus = (v) => {
+        setDraft(f => ({
+            ...f,
+            out_of_stock: v === 'out_of_stock' ? 'true' : '',
+            low_stock_only: v === 'low_stock' ? 'true' : '',
+            is_active: v === 'active' ? 'true'
+                : v === 'inactive' ? 'false' : '',
+        }))
+    }
 
     return (
-        <div className="bg-white border border-gray-100 rounded-xl p-4 space-y-3 shadow-sm">
-            <div className="flex items-center justify-between">
-                <span className="text-[10px] font-extrabold uppercase tracking-widest text-gray-500">
-                    Filters
-                </span>
-                {hasActive && (
-                    <button onClick={onReset}
-                        className="text-[10px] font-bold text-red-500 hover:text-red-700 uppercase tracking-wider transition-colors">
-                        ✕ Clear All
-                    </button>
-                )}
-            </div>
+        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {/* ── Top bar ── */}
+            <div className="flex gap-2 p-3">
                 {/* Search */}
-                <div className="col-span-2 sm:col-span-3 lg:col-span-2">
+                <div className="relative flex-1 min-w-0">
+                    <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
                     <input
-                        value={filters.search}
+                        value={draft.search}
                         onChange={e => set('search', e.target.value)}
+                        onKeyDown={handleKeyDown}
                         placeholder="Search product, variant, batch, aisle…"
-                        className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-primary-400 transition-colors"
+                        className="w-full text-xs pl-8 pr-3 py-2.5 border border-gray-200 rounded-xl outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-100 transition-all bg-gray-50 focus:bg-white placeholder-gray-400"
                     />
                 </div>
 
-                {/* Stock status */}
-                <select
-                    value={
-                        filters.out_of_stock === 'true' ? 'out_of_stock'
-                            : filters.low_stock_only === 'true' ? 'low_stock'
-                                : filters.is_active === 'false' ? 'inactive'
-                                    : filters.is_active === 'true' ? 'active'
-                                        : ''
-                    }
-                    onChange={e => {
-                        const v = e.target.value
-                        onChange({
-                            ...filters,
-                            out_of_stock: v === 'out_of_stock' ? 'true' : '',
-                            low_stock_only: v === 'low_stock' ? 'true' : '',
-                            is_active: v === 'active' ? 'true'
-                                : v === 'inactive' ? 'false' : '',
-                            page: 1,
-                        })
-                    }}
-                    className="text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-primary-400 bg-white transition-colors"
-                >
-                    <option value="">All Stock Status</option>
-                    <option value="active">Active Only</option>
-                    <option value="inactive">Inactive Only</option>
-                    <option value="low_stock">Low Stock</option>
-                    <option value="out_of_stock">Out of Stock</option>
-                </select>
-
-                {/* Unit */}
-                <select
-                    value={filters.stock_unit}
-                    onChange={e => set('stock_unit', e.target.value)}
-                    className="text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-primary-400 bg-white transition-colors"
-                >
-                    <option value="">All Units</option>
-                    {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
-                </select>
-
-                {/* Sort */}
-                <div className="flex gap-1">
+                {/* Sort — hidden on small screens */}
+                <div className="hidden md:flex items-center gap-1.5 px-3 border border-gray-200 rounded-xl bg-gray-50 shrink-0">
+                    <svg className="w-3 h-3 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
+                    </svg>
                     <select
-                        value={filters.sort_by}
+                        value={draft.sort_by}
                         onChange={e => set('sort_by', e.target.value)}
-                        className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-2 outline-none focus:border-primary-400 bg-white transition-colors"
+                        className="text-xs bg-transparent outline-none py-2 text-gray-700 cursor-pointer"
                     >
-                        <option value="created_at">Created</option>
-                        <option value="updated_at">Updated</option>
-                        <option value="sale_price">Price</option>
-                        <option value="stock_qty">Stock</option>
-                        <option value="expiry_date">Expiry</option>
-                        <option value="last_restocked_at">Restocked</option>
+                        {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                     <button
-                        onClick={() => set('sort_order', filters.sort_order === 'ASC' ? 'DESC' : 'ASC')}
-                        className="px-2 py-1 text-xs border border-gray-200 rounded-lg hover:border-primary-300 transition-colors font-bold text-gray-600"
-                        title="Toggle sort direction"
+                        onClick={() => set('sort_order', draft.sort_order === 'ASC' ? 'DESC' : 'ASC')}
+                        className="text-gray-500 hover:text-primary-600 font-bold text-sm transition-colors w-5 text-center"
+                        title="Toggle direction"
                     >
-                        {filters.sort_order === 'ASC' ? '↑' : '↓'}
+                        {draft.sort_order === 'ASC' ? '↑' : '↓'}
                     </button>
                 </div>
+
+                {/* Filters toggle */}
+                <button
+                    onClick={() => setExpanded(e => !e)}
+                    className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl border transition-all shrink-0 ${expanded
+                        ? 'bg-primary-600 border-primary-600 text-white'
+                        : 'bg-gray-50 border-gray-200 text-gray-600 hover:border-primary-300 hover:text-primary-600'
+                        }`}
+                >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z" />
+                    </svg>
+                    <span className="hidden sm:inline">Filters</span>
+                    {activeChips.length > 0 && (
+                        <span className={`text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center ${expanded ? 'bg-white text-primary-600' : 'bg-primary-600 text-white'
+                            }`}>
+                            {activeChips.length}
+                        </span>
+                    )}
+                </button>
+
+                {/* Search button */}
+                <button
+                    onClick={handleSearch}
+                    disabled={loading}
+                    className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 bg-primary-600 hover:bg-primary-700 active:bg-primary-800 text-white rounded-xl disabled:opacity-50 transition-colors shadow-sm shrink-0"
+                >
+                    {loading
+                        ? <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                    }
+                    <span className="hidden sm:inline">{loading ? 'Searching…' : 'Search'}</span>
+                </button>
             </div>
 
-            {/* Price range row */}
-            <div className="flex flex-wrap gap-3 items-center">
-                <span className="text-[10px] uppercase tracking-widest font-bold text-gray-400">Price:</span>
-                <input
-                    type="number" placeholder="Min ₹"
-                    value={filters.min_sale_price}
-                    onChange={e => set('min_sale_price', e.target.value)}
-                    className="w-20 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 transition-colors"
-                />
-                <span className="text-gray-300 text-xs">—</span>
-                <input
-                    type="number" placeholder="Max ₹"
-                    value={filters.max_sale_price}
-                    onChange={e => set('max_sale_price', e.target.value)}
-                    className="w-20 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 transition-colors"
-                />
+            {/* ── Active chips strip — shown when collapsed and filters are applied ── */}
+            {activeChips.length > 0 && !expanded && (
+                <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-t border-gray-100 bg-primary-50/60">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-primary-500 shrink-0">Active:</span>
+                    {activeChips.map(chip => (
+                        <span key={chip.key}
+                            className="inline-flex items-center text-[11px] font-semibold bg-white border border-primary-200 text-primary-700 px-2.5 py-0.5 rounded-full shadow-sm">
+                            {chip.label}
+                        </span>
+                    ))}
+                    <button onClick={handleReset}
+                        className="ml-auto text-[11px] font-bold text-red-500 hover:text-red-700 transition-colors shrink-0">
+                        ✕ Clear all
+                    </button>
+                </div>
+            )}
 
-                <span className="text-[10px] uppercase tracking-widest font-bold text-gray-400 ml-2">
-                    Expiry:
-                </span>
-                <input
-                    type="date"
-                    value={filters.expiry_after}
-                    onChange={e => set('expiry_after', e.target.value)}
-                    className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 transition-colors"
-                />
-                <span className="text-gray-300 text-xs">→</span>
-                <input
-                    type="date"
-                    value={filters.expiry_before}
-                    onChange={e => set('expiry_before', e.target.value)}
-                    className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 transition-colors"
-                />
+            {/* ── Expanded panel ── */}
+            {expanded && (
+                <div className="border-t border-gray-100">
+                    <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
 
-                {loading && (
-                    <span className="ml-auto text-[10px] text-gray-400 animate-pulse">Loading…</span>
-                )}
-            </div>
+                        {/* Stock Status */}
+                        <div className="space-y-2">
+                            <p className="text-[10px] font-extrabold uppercase tracking-widest text-gray-400">Stock Status</p>
+                            <div className="space-y-1">
+                                {STOCK_STATUS_OPTIONS.map(opt => (
+                                    <button key={opt.value}
+                                        onClick={() => setStockStatus(opt.value)}
+                                        className={`w-full text-left text-xs px-3 py-2 rounded-lg border font-medium transition-all ${stockStatusVal === opt.value
+                                            ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
+                                            : 'bg-white border-gray-200 text-gray-600 hover:border-primary-200 hover:bg-primary-50/50'
+                                            }`}
+                                    >
+                                        {opt.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Stock Unit */}
+                        <div className="space-y-2">
+                            <p className="text-[10px] font-extrabold uppercase tracking-widest text-gray-400">Stock Unit</p>
+                            <div className="grid grid-cols-3 gap-1">
+                                {['', ...UNITS].map(u => (
+                                    <button key={u || 'all'}
+                                        onClick={() => set('stock_unit', u)}
+                                        className={`text-xs py-2 px-1 rounded-lg border font-medium transition-all ${draft.stock_unit === u
+                                            ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
+                                            : 'bg-white border-gray-200 text-gray-600 hover:border-primary-200 hover:bg-primary-50/50'
+                                            }`}
+                                    >
+                                        {u || 'All'}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Price Range */}
+                        <div className="space-y-2">
+                            <p className="text-[10px] font-extrabold uppercase tracking-widest text-gray-400">Sale Price (₹)</p>
+                            <div className="space-y-2">
+                                <div className="relative">
+                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">₹</span>
+                                    <input
+                                        type="number" placeholder="Min price"
+                                        value={draft.min_sale_price}
+                                        onChange={e => set('min_sale_price', e.target.value)}
+                                        className="w-full text-xs pl-6 pr-3 py-2 border border-gray-200 rounded-lg outline-none focus:border-primary-400 bg-white transition-colors"
+                                    />
+                                </div>
+                                <div className="relative">
+                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">₹</span>
+                                    <input
+                                        type="number" placeholder="Max price"
+                                        value={draft.max_sale_price}
+                                        onChange={e => set('max_sale_price', e.target.value)}
+                                        className="w-full text-xs pl-6 pr-3 py-2 border border-gray-200 rounded-lg outline-none focus:border-primary-400 bg-white transition-colors"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Expiry + Sort */}
+                        <div className="space-y-4">
+                            <div className="space-y-2">
+                                <p className="text-[10px] font-extrabold uppercase tracking-widest text-gray-400">Expiry Date</p>
+                                <div className="space-y-1.5">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[10px] text-gray-400 w-8 shrink-0 font-medium">After</span>
+                                        <input type="date"
+                                            value={draft.expiry_after}
+                                            onChange={e => set('expiry_after', e.target.value)}
+                                            className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 bg-white transition-colors"
+                                        />
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[10px] text-gray-400 w-8 shrink-0 font-medium">Before</span>
+                                        <input type="date"
+                                            value={draft.expiry_before}
+                                            onChange={e => set('expiry_before', e.target.value)}
+                                            className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-primary-400 bg-white transition-colors"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Sort — shown in expanded panel on all screens */}
+                            <div className="space-y-2">
+                                <p className="text-[10px] font-extrabold uppercase tracking-widest text-gray-400">Sort By</p>
+                                <div className="flex gap-1">
+                                    <select
+                                        value={draft.sort_by}
+                                        onChange={e => set('sort_by', e.target.value)}
+                                        className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-2 bg-white outline-none focus:border-primary-400"
+                                    >
+                                        {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                    </select>
+                                    <button
+                                        onClick={() => set('sort_order', draft.sort_order === 'ASC' ? 'DESC' : 'ASC')}
+                                        className="px-3 py-2 text-sm border border-gray-200 rounded-lg hover:border-primary-300 font-bold text-gray-600 transition-colors"
+                                    >
+                                        {draft.sort_order === 'ASC' ? '↑' : '↓'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Panel footer */}
+                    <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50/50">
+                        <button onClick={handleReset}
+                            className="text-xs font-semibold text-red-500 hover:text-red-700 transition-colors">
+                            ✕ Clear all filters
+                        </button>
+                        <button
+                            onClick={handleSearch}
+                            disabled={loading}
+                            className="flex items-center gap-2 text-xs font-bold px-5 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg disabled:opacity-50 transition-colors shadow-sm"
+                        >
+                            {loading
+                                ? <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                </svg>
+                                : null
+                            }
+                            {loading ? 'Searching…' : 'Apply & Search'}
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }
 
-// ── Pagination Bar ───────────────────────────────────────────────────────────
+// ── PaginationBar ─────────────────────────────────────────────────────────────
 
 function PaginationBar({ pagination, onPageChange }) {
     if (!pagination || pagination.total_pages <= 1) return null
@@ -349,45 +488,56 @@ function PaginationBar({ pagination, onPageChange }) {
     const from = (page - 1) * limit + 1
     const to = Math.min(page * limit, total)
 
+    const getPages = () => {
+        if (total_pages <= 7) return Array.from({ length: total_pages }, (_, i) => i + 1)
+        const pages = [1]
+        if (page > 3) pages.push('...')
+        for (let i = Math.max(2, page - 1); i <= Math.min(total_pages - 1, page + 1); i++) pages.push(i)
+        if (page < total_pages - 2) pages.push('...')
+        pages.push(total_pages)
+        return pages
+    }
+
     return (
-        <div className="flex items-center justify-between text-xs text-gray-500 pt-2">
-            <span>{from}–{to} of {total} items</span>
-            <div className="flex gap-1">
+        <div className="flex items-center justify-between py-3 px-1 border-t border-gray-100">
+            <span className="text-xs text-gray-500">
+                Showing <span className="font-semibold text-gray-700">{from}–{to}</span> of{' '}
+                <span className="font-semibold text-gray-700">{total}</span> items
+            </span>
+            <div className="flex items-center gap-1">
                 <button
                     onClick={() => onPageChange(page - 1)}
                     disabled={page <= 1}
-                    className="px-2 py-1 border border-gray-200 rounded hover:border-primary-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    className="px-2.5 py-1.5 text-xs font-semibold border border-gray-200 rounded-lg hover:border-primary-300 hover:text-primary-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
-                    ‹ Prev
+                    ← Prev
                 </button>
-                {Array.from({ length: Math.min(total_pages, 7) }, (_, i) => {
-                    // Show first, last, current ±1, and ellipsis
-                    const p = i + 1
-                    return (
-                        <button key={p}
+                {getPages().map((p, i) =>
+                    p === '...'
+                        ? <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
+                        : <button key={p}
                             onClick={() => onPageChange(p)}
-                            className={`px-2.5 py-1 border rounded transition-colors ${p === page
-                                    ? 'bg-primary-600 border-primary-600 text-white font-bold'
-                                    : 'border-gray-200 hover:border-primary-300'
+                            className={`w-8 h-8 text-xs font-semibold rounded-lg border transition-colors ${p === page
+                                ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
+                                : 'border-gray-200 text-gray-600 hover:border-primary-300 hover:text-primary-600'
                                 }`}
                         >
                             {p}
                         </button>
-                    )
-                })}
+                )}
                 <button
                     onClick={() => onPageChange(page + 1)}
                     disabled={page >= total_pages}
-                    className="px-2 py-1 border border-gray-200 rounded hover:border-primary-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    className="px-2.5 py-1.5 text-xs font-semibold border border-gray-200 rounded-lg hover:border-primary-300 hover:text-primary-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
-                    Next ›
+                    Next →
                 </button>
             </div>
         </div>
     )
 }
 
-// ── RestockModal (unchanged) ─────────────────────────────────────────────────
+// ── RestockModal ──────────────────────────────────────────────────────────────
 
 function RestockModal({ open, onClose, item, martId, staffId }) {
     const dispatch = useDispatch()
@@ -395,11 +545,9 @@ function RestockModal({ open, onClose, item, martId, staffId }) {
     const [form, setForm] = useState(EMPTY_RESTOCK_FORM)
 
     useEffect(() => { if (open) setForm(EMPTY_RESTOCK_FORM) }, [open, item?.id])
-
     if (!item) return null
 
     const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
-
     const currentQty = parseFloat(item.stock_qty)
     const inputQty = parseFloat(form.stock_qty) || 0
     const projected = form.mode === 'add' ? currentQty + inputQty : inputQty
@@ -447,7 +595,7 @@ function RestockModal({ open, onClose, item, martId, staffId }) {
         >
             <div className="space-y-5">
                 <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
-                    <p className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Current</p>
+                    <p className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Current Stock</p>
                     <p className="text-lg font-bold text-gray-900">
                         {currentQty} <span className="text-xs text-gray-500">{item.stock_unit}</span>
                     </p>
@@ -459,7 +607,8 @@ function RestockModal({ open, onClose, item, martId, staffId }) {
                             <button key={m} type="button" onClick={() => set('mode', m)}
                                 className={`px-3 py-2 rounded-lg text-xs font-bold border transition-colors ${form.mode === m
                                     ? 'bg-primary-600 border-primary-600 text-white'
-                                    : 'bg-white border-gray-200 text-gray-700 hover:border-primary-300'}`}>
+                                    : 'bg-white border-gray-200 text-gray-700 hover:border-primary-300'
+                                    }`}>
                                 {m === 'add' ? 'ADD (delta)' : 'SET (absolute)'}
                             </button>
                         ))}
@@ -493,26 +642,54 @@ function RestockModal({ open, onClose, item, martId, staffId }) {
     )
 }
 
-// ── HistoryModal (unchanged) ─────────────────────────────────────────────────
+// ── HistoryModal ──────────────────────────────────────────────────────────────
+
+const TXN_TYPES_ALL = [
+    'restock', 'sale', 'return', 'damage',
+    'expired', 'theft', 'adjustment', 'transfer', 'opening_stock',
+]
+const EMPTY_TXN_FILTERS = { type: '', from: '', to: '', page: 1, limit: 50 }
 
 function HistoryModal({ open, onClose, item }) {
-    const dispatch = useDispatch()
-    const txns = useSelector(s => selectItemTransactions(s, item?.id))
-    const loading = useSelector(selectItemTransactionsLoading)
+    const [txnFilters, setTxnFilters] = useState(EMPTY_TXN_FILTERS)
+    const [loading, setLoading] = useState(false)
+    const [txns, setTxns] = useState([])
+    const [pagination, setPagination] = useState(null)
 
     useEffect(() => {
-        if (open && item?.id) dispatch(fetchItemTransactions({ id: item.id, limit: 100 }))
-    }, [open, item?.id, dispatch])
+        if (!open || !item?.id) return
+        setTxnFilters(EMPTY_TXN_FILTERS)
+        setTxns([])
+        setPagination(null)
+    }, [open, item?.id])
+
+    useEffect(() => {
+        if (!open || !item?.id) return
+        const params = new URLSearchParams({ limit: txnFilters.limit, page: txnFilters.page })
+        if (txnFilters.type) params.set('type', txnFilters.type)
+        if (txnFilters.from) params.set('from', txnFilters.from)
+        if (txnFilters.to) params.set('to', txnFilters.to)
+
+        setLoading(true)
+        // Uses your api instance — adjust path as needed
+        import('../api/index').then(({ default: api }) =>
+            api.get(`/inventory/${item.id}/transactions?${params}`)
+        ).then(res => {
+            if (res.success) { setTxns(res.data || []); setPagination(res.pagination || null) }
+        }).catch(console.error).finally(() => setLoading(false))
+    }, [open, item?.id, txnFilters])
 
     if (!item) return null
 
-    const typeColor = (type) => ({
+    const setF = (k, v) => setTxnFilters(f => ({ ...f, [k]: v, page: 1 }))
+
+    const typeColor = t => ({
         restock: 'green', sale: 'blue', return: 'yellow',
         damage: 'red', expired: 'red', theft: 'red',
-        adjustment: 'gray', transfer: 'purple',
-    })[type] || 'gray'
+        adjustment: 'gray', transfer: 'purple', opening_stock: 'green',
+    })[t] || 'gray'
 
-    const fmtDateTime = (iso) => {
+    const fmtDateTime = iso => {
         if (!iso) return '—'
         return new Date(iso).toLocaleString('en-IN', {
             day: '2-digit', month: 'short', year: '2-digit',
@@ -520,39 +697,75 @@ function HistoryModal({ open, onClose, item }) {
         })
     }
 
+    const net = txns.reduce((s, t) => s + parseFloat(t.qty_change || 0), 0)
+    const hasFilters = txnFilters.type || txnFilters.from || txnFilters.to
+
     return (
         <Modal
             title={`Stock History — ${item.mongo_product_id} / ${item.variant_id}`}
             open={open} onClose={onClose} size="xl"
             footer={<Button variant="secondary" onClick={onClose}>Close</Button>}
         >
+            {/* Filters */}
+            <div className="flex flex-wrap gap-3 items-end mb-4 pb-4 border-b border-gray-100">
+                <div className="space-y-1">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Type</p>
+                    <select value={txnFilters.type} onChange={e => setF('type', e.target.value)}
+                        className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white outline-none focus:border-primary-400">
+                        <option value="">All types</option>
+                        {TXN_TYPES_ALL.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                </div>
+                <div className="space-y-1">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">From</p>
+                    <input type="date" value={txnFilters.from} onChange={e => setF('from', e.target.value)}
+                        className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-primary-400" />
+                </div>
+                <div className="space-y-1">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">To</p>
+                    <input type="date" value={txnFilters.to} onChange={e => setF('to', e.target.value)}
+                        className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-primary-400" />
+                </div>
+                {hasFilters && (
+                    <button onClick={() => setTxnFilters(EMPTY_TXN_FILTERS)}
+                        className="text-xs font-semibold text-red-500 hover:text-red-700 self-end pb-1.5">
+                        ✕ Clear
+                    </button>
+                )}
+                {pagination && (
+                    <div className="ml-auto text-right self-end">
+                        <p className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Total</p>
+                        <p className="text-xl font-bold text-gray-800">{pagination.total}</p>
+                    </div>
+                )}
+            </div>
+
+            {/* Table */}
             {loading ? (
-                <p className="text-sm text-gray-500 py-8 text-center">Loading…</p>
+                <p className="text-sm text-gray-500 py-10 text-center">Loading…</p>
             ) : !txns.length ? (
-                <p className="text-sm text-gray-500 py-8 text-center">No transactions yet</p>
+                <p className="text-sm text-gray-500 py-10 text-center">No transactions match your filters.</p>
             ) : (
                 <div className="overflow-x-auto -mx-6 px-6">
                     <table className="w-full text-xs">
                         <thead>
                             <tr className="border-b-2 border-gray-200">
                                 {['Type', 'Change', 'Before → After', 'Reason', 'When', 'By / Order'].map(h => (
-                                    <th key={h} className="text-left text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 pr-3 whitespace-nowrap">
-                                        {h}
-                                    </th>
+                                    <th key={h} className="text-left text-[10px] uppercase tracking-widest font-bold text-gray-500 pb-2 pr-3 whitespace-nowrap">{h}</th>
                                 ))}
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                             {txns.map(t => {
                                 const change = parseFloat(t.qty_change)
-                                const positive = change >= 0
+                                const pos = change >= 0
                                 return (
                                     <tr key={t.id} className="hover:bg-gray-50 transition-colors">
                                         <td className="py-2 pr-3 align-top">
                                             <Badge variant={typeColor(t.type)} size="xs">{t.type.toUpperCase()}</Badge>
                                         </td>
-                                        <td className={`py-2 pr-3 text-right font-bold tabular-nums whitespace-nowrap ${positive ? 'text-green-700' : 'text-red-600'}`}>
-                                            {positive ? '+' : ''}{change}
+                                        <td className={`py-2 pr-3 text-right font-bold tabular-nums whitespace-nowrap ${pos ? 'text-green-700' : 'text-red-600'}`}>
+                                            {pos ? '+' : ''}{change}
                                         </td>
                                         <td className="py-2 pr-3 text-center text-gray-500 tabular-nums whitespace-nowrap">
                                             {t.qty_before} → <span className="font-bold text-gray-800">{t.qty_after}</span>
@@ -575,20 +788,41 @@ function HistoryModal({ open, onClose, item }) {
                             })}
                         </tbody>
                     </table>
-                    <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between text-[10px] text-gray-500">
-                        <span>{txns.length} transaction{txns.length !== 1 ? 's' : ''}</span>
-                        <span className="tabular-nums">
+
+                    {/* Footer */}
+                    <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between flex-wrap gap-3">
+                        <span className="text-[11px] text-gray-500 tabular-nums">
                             Net change:{' '}
-                            <span className={
-                                txns.reduce((s, t) => s + parseFloat(t.qty_change), 0) >= 0
-                                    ? 'text-green-700 font-bold' : 'text-red-600 font-bold'
-                            }>
-                                {(() => {
-                                    const net = txns.reduce((s, t) => s + parseFloat(t.qty_change), 0)
-                                    return (net >= 0 ? '+' : '') + net.toFixed(2)
-                                })()}
+                            <span className={`font-bold ${net >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+                                {(net >= 0 ? '+' : '') + net.toFixed(2)}
                             </span>
                         </span>
+                        {pagination && pagination.total_pages > 1 && (
+                            <div className="flex items-center gap-1 ml-auto">
+                                <span className="text-[11px] text-gray-400 mr-2">
+                                    {(pagination.page - 1) * pagination.limit + 1}–{Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total}
+                                </span>
+                                <button
+                                    onClick={() => setTxnFilters(f => ({ ...f, page: f.page - 1 }))}
+                                    disabled={!pagination.has_prev}
+                                    className="px-2 py-1 text-xs border border-gray-200 rounded hover:border-primary-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                                >‹</button>
+                                {Array.from({ length: Math.min(pagination.total_pages, 5) }, (_, i) => i + 1).map(p => (
+                                    <button key={p}
+                                        onClick={() => setTxnFilters(f => ({ ...f, page: p }))}
+                                        className={`w-7 h-7 text-xs border rounded transition-colors ${p === pagination.page
+                                            ? 'bg-primary-600 border-primary-600 text-white font-bold'
+                                            : 'border-gray-200 hover:border-primary-300'
+                                            }`}
+                                    >{p}</button>
+                                ))}
+                                <button
+                                    onClick={() => setTxnFilters(f => ({ ...f, page: f.page + 1 }))}
+                                    disabled={!pagination.has_next}
+                                    className="px-2 py-1 text-xs border border-gray-200 rounded hover:border-primary-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                                >›</button>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
@@ -596,57 +830,54 @@ function HistoryModal({ open, onClose, item }) {
     )
 }
 
-// ── Main Page ────────────────────────────────────────────────────────────────
+// ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Inventory() {
     const dispatch = useDispatch()
     const { martId, staffId } = useAuth()
     const resolvedMartId = martId
 
-    // ── Selectors ──────────────────────────────────────────────────────────
     const items = useSelector(selectInventoryItems)
     const loading = useSelector(selectInventoryLoading)
     const saving = useSelector(selectInventorySaving)
     const localStats = useSelector(selectInventoryStats)
-
     const filteredItems = useSelector(selectFilteredItems)
     const filteredLoad = useSelector(selectFilteredLoading)
     const pagination = useSelector(selectFilteredPagination)
-
     const backendSummary = useSelector(selectInventorySummary)
     const summaryLoading = useSelector(selectInventorySummaryLoading)
 
-    // ── Local state ────────────────────────────────────────────────────────
-    const [filters, setFilters] = useState(EMPTY_FILTERS)
+    // committedFilters = what was last searched; drives the API call
+    const [committedFilters, setCommittedFilters] = useState(EMPTY_FILTERS)
     const [addOpen, setAddOpen] = useState(false)
     const [bulkOpen, setBulkOpen] = useState(false)
     const [restockItem, setRestockItem] = useState(null)
     const [historyItem, setHistoryItem] = useState(null)
     const [form, setForm] = useState(EMPTY_FORM)
 
-    // ── Initial load ───────────────────────────────────────────────────────
-    // fetchInventory keeps the full unfiltered list in state (for local stats).
-    // fetchInventorySummary fetches backend aggregation once.
-    // fetchInventoryFiltered does the paginated/filtered grid data.
+    // Initial load
     useEffect(() => {
         if (!martId) return
         dispatch(fetchInventory(martId))
         dispatch(fetchInventorySummary(martId))
     }, [martId, dispatch])
 
-    // ── Filtered fetch — fires whenever filters change ─────────────────────
+    // Filtered fetch — ONLY fires when committedFilters changes (Search button clicked)
+    // IMPORTANT: In inventorySlice.js, change the URL in fetchInventoryFiltered from:
+    //   api.get(`/inventory?${params}`)
+    // to:
+    //   api.get(`/inventory/filters?${params}`)
     useEffect(() => {
         if (!martId) return
-        dispatch(fetchInventoryFiltered({ martId, ...filters }))
-    }, [martId, filters, dispatch])
+        dispatch(fetchInventoryFiltered({ martId, ...committedFilters }))
+    }, [martId, committedFilters, dispatch])
 
-    const handleFilterChange = useCallback((next) => setFilters(next), [])
-    const handleFilterReset = useCallback(() => setFilters(EMPTY_FILTERS), [])
-    const handlePageChange = useCallback((p) => setFilters(f => ({ ...f, page: p })), [])
+    const handleSearch = useCallback(f => setCommittedFilters({ ...f, page: 1 }), [])
+    const handleFilterReset = useCallback(() => setCommittedFilters(EMPTY_FILTERS), [])
+    const handlePageChange = useCallback(p => setCommittedFilters(f => ({ ...f, page: p })), [])
 
     const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
-    // ── Single add ─────────────────────────────────────────────────────────
     const handleAdd = async () => {
         const required = ['product_id', 'variant_id', 'sale_price', 'mrp', 'stock_qty', 'stock_unit', 'low_stock_alert', 'type']
         const missing = required.find(k => form[k] === '' || form[k] === null || form[k] === undefined)
@@ -678,12 +909,10 @@ export default function Inventory() {
         if (addInventoryItem.fulfilled.match(action)) {
             setAddOpen(false)
             setForm(EMPTY_FORM)
-            // Refresh backend summary after add
             dispatch(fetchInventorySummary(martId))
         }
     }
 
-    // ── Inline update ──────────────────────────────────────────────────────
     const handleInlineUpdate = (id, field, value) => {
         if (field === 'stock_qty') {
             dispatch(showToast({ message: 'Use the Restock button to change stock (audit-logged).', type: 'info' }))
@@ -693,25 +922,24 @@ export default function Inventory() {
         dispatch(updateInventoryItem({ id, patch: { [field]: isNumeric ? parseFloat(value) : value } }))
     }
 
-    // ── Grid columns (unchanged) ───────────────────────────────────────────
+    const handleRefresh = () => {
+        dispatch(fetchInventory(resolvedMartId))
+        dispatch(fetchInventorySummary(resolvedMartId))
+        dispatch(fetchInventoryFiltered({ martId: resolvedMartId, ...committedFilters }))
+    }
+
     const columns = [
         {
             key: 'product', label: 'Product ID',
             render: r => (
-                <div className="flex items-center gap-2 py-1">
-                    <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border border-gray-200">
-                        #{r.product_code}
-                    </span>
-                </div>
+                <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border border-gray-200">
+                    #{r.product_code}
+                </span>
             ),
         },
         {
             key: 'variant', label: 'Variant',
-            render: r => (
-                <div className="py-1">
-                    <Badge variant="blue" size="xs" className="font-bold tracking-wide">{r.variant_id}</Badge>
-                </div>
-            ),
+            render: r => <Badge variant="blue" size="xs">{r.variant_id}</Badge>,
         },
         {
             key: 'pricing', label: 'Pricing',
@@ -769,7 +997,7 @@ export default function Inventory() {
             ),
         },
         {
-            key: 'expiry_restock', label: 'Dates',
+            key: 'dates', label: 'Dates',
             render: r => (
                 <div className="flex items-center gap-3 text-[10px]">
                     <div className="flex items-center gap-1">
@@ -794,7 +1022,7 @@ export default function Inventory() {
             render: r => (
                 <div className="flex items-center justify-center">
                     <button
-                        onClick={(e) => { e.stopPropagation(); dispatch(toggleInventoryActive(r)) }}
+                        onClick={e => { e.stopPropagation(); dispatch(toggleInventoryActive(r)) }}
                         className={`w-7 h-4 rounded-full transition-all duration-200 relative ${r.is_active ? 'bg-green-500 shadow-sm' : 'bg-gray-300'}`}
                     >
                         <span className={`absolute top-0.5 left-0.5 block w-3 h-3 rounded-full bg-white transition-transform duration-200 ${r.is_active ? 'translate-x-3' : 'translate-x-0'}`} />
@@ -807,16 +1035,14 @@ export default function Inventory() {
             render: r => (
                 <div className="flex justify-end pr-2 gap-1">
                     <button
-                        onClick={(e) => { e.stopPropagation(); setRestockItem(r) }}
+                        onClick={e => { e.stopPropagation(); setRestockItem(r) }}
                         className="text-[10px] text-green-700 font-black hover:bg-green-50 px-2 py-1 rounded transition-colors uppercase tracking-tighter"
-                        title="Restock / adjust stock"
                     >
                         Stock
                     </button>
                     <button
-                        onClick={(e) => { e.stopPropagation(); setHistoryItem(r) }}
+                        onClick={e => { e.stopPropagation(); setHistoryItem(r) }}
                         className="text-[10px] text-gray-600 font-black hover:bg-gray-100 px-2 py-1 rounded transition-colors uppercase tracking-tighter"
-                        title="View transaction history"
                     >
                         History
                     </button>
@@ -825,7 +1051,6 @@ export default function Inventory() {
         },
     ]
 
-    // ── Stats: prefer backend summary, fall back to local counts ──────────
     const statsCards = backendSummary
         ? [
             { label: 'Total Items', value: backendSummary.total_items, color: 'text-gray-700' },
@@ -856,25 +1081,21 @@ export default function Inventory() {
                 action={
                     <div className="flex gap-2">
                         <Button variant="secondary" onClick={() => setBulkOpen(true)}>📤 Bulk Upload</Button>
-                        <Button variant="secondary" onClick={() => {
-                            dispatch(fetchInventory(resolvedMartId))
-                            dispatch(fetchInventorySummary(resolvedMartId))
-                            dispatch(fetchInventoryFiltered({ martId: resolvedMartId, ...filters }))
-                        }}>↻ Refresh</Button>
+                        <Button variant="secondary" onClick={handleRefresh}>↻ Refresh</Button>
                         <Button variant="primary" onClick={() => { setForm(EMPTY_FORM); setAddOpen(true) }}>+ Add Item</Button>
                     </div>
                 }
             />
 
-            {/* Stats Cards */}
+            {/* Stats */}
             {(items.length > 0 || backendSummary) && (
                 <div className="flex gap-3 flex-wrap">
                     {statsCards.map(s => (
-                        <div key={s.label} className="bg-white border border-gray-100 rounded-lg px-4 py-2 shadow-sm">
-                            <p className={`text-lg font-bold ${s.color}`}>
+                        <div key={s.label} className="bg-white border border-gray-100 rounded-xl px-4 py-2.5 shadow-sm min-w-[100px]">
+                            <p className={`text-xl font-bold ${s.color}`}>
                                 {summaryLoading && backendSummary === null ? '…' : s.value}
                             </p>
-                            <p className="text-xs text-gray-400">{s.label}</p>
+                            <p className="text-[11px] text-gray-400">{s.label}</p>
                         </div>
                     ))}
                 </div>
@@ -882,30 +1103,44 @@ export default function Inventory() {
 
             {/* Filter Bar */}
             <FilterBar
-                filters={filters}
-                onChange={handleFilterChange}
+                filters={committedFilters}
+                onSearch={handleSearch}
                 onReset={handleFilterReset}
                 loading={filteredLoad}
             />
 
-            {/* Grid — uses backend-filtered data */}
+            {/* Result summary */}
+            {pagination && (
+                <div className="flex items-center justify-between px-1">
+                    <p className="text-xs text-gray-500">
+                        {pagination.total === 0
+                            ? 'No items match your filters'
+                            : <><span className="font-semibold text-gray-700">{pagination.total}</span> item{pagination.total !== 1 ? 's' : ''} found</>
+                        }
+                    </p>
+                    {pagination.total_pages > 1 && (
+                        <p className="text-xs text-gray-400">
+                            Page {pagination.page} of {pagination.total_pages}
+                        </p>
+                    )}
+                </div>
+            )}
+
+            {/* Grid */}
             <Grid
                 columns={columns}
                 data={filteredItems}
                 loading={filteredLoad}
                 emptyText="No inventory items match your filters."
-                pageSize={filters.limit}
+                pagination={false}
+                showSearch={false}
             />
 
             {/* Pagination */}
             <PaginationBar pagination={pagination} onPageChange={handlePageChange} />
 
-            {/* Add Item Modal */}
-            <Modal
-                title="Add Inventory Item"
-                open={addOpen}
-                onClose={() => setAddOpen(false)}
-                size="lg"
+            {/* Add Modal */}
+            <Modal title="Add Inventory Item" open={addOpen} onClose={() => setAddOpen(false)} size="lg"
                 footer={
                     <>
                         <Button variant="secondary" onClick={() => setAddOpen(false)}>Cancel</Button>
@@ -916,8 +1151,7 @@ export default function Inventory() {
                 <div className="space-y-8">
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="w-1 h-3 bg-primary-600 rounded-full" />
-                            Product Reference
+                            <span className="w-1 h-3 bg-primary-600 rounded-full" /> Product Reference
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                             <Input label="Product ID (Mongo) *" value={form.product_id}
@@ -926,11 +1160,9 @@ export default function Inventory() {
                                 onChange={e => set('variant_id', e.target.value)} placeholder="VID-AMUL-500" />
                         </div>
                     </section>
-
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="w-1 h-3 bg-primary-600 rounded-full" />
-                            Pricing
+                            <span className="w-1 h-3 bg-primary-600 rounded-full" /> Pricing
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                             <Input label="Sale Price (₹) *" type="number" value={form.sale_price}
@@ -939,11 +1171,9 @@ export default function Inventory() {
                                 onChange={e => set('mrp', e.target.value)} placeholder="55.00" />
                         </div>
                     </section>
-
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="w-1 h-3 bg-primary-600 rounded-full" />
-                            Stock Information
+                            <span className="w-1 h-3 bg-primary-600 rounded-full" /> Stock Information
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                             <Input label="Stock Qty *" type="number" value={form.stock_qty}
@@ -959,15 +1189,11 @@ export default function Inventory() {
                             <Input label="Low Stock Alert *" type="number" value={form.low_stock_alert}
                                 onChange={e => set('low_stock_alert', e.target.value)} placeholder="10" />
                         </div>
-                        <p className="text-[10px] text-gray-500">
-                            Type defaults to "restock". Use "return", "damage", "expired" for other sources.
-                        </p>
+                        <p className="text-[10px] text-gray-500">Type defaults to "restock". Use "return", "damage", "expired" for other sources.</p>
                     </section>
-
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="w-1 h-3 bg-primary-600 rounded-full" />
-                            Additional Details
+                            <span className="w-1 h-3 bg-primary-600 rounded-full" /> Additional Details
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                             <Input label="Expiry Date" type="date" value={form.expiry_date}
@@ -981,29 +1207,18 @@ export default function Inventory() {
                 </div>
             </Modal>
 
-            {/* Restock Modal */}
-            <RestockModal
-                open={!!restockItem} onClose={() => setRestockItem(null)}
-                item={restockItem} martId={resolvedMartId} staffId={staffId}
-            />
+            <RestockModal open={!!restockItem} onClose={() => setRestockItem(null)}
+                item={restockItem} martId={resolvedMartId} staffId={staffId} />
 
-            {/* History Modal */}
-            <HistoryModal
-                open={!!historyItem} onClose={() => setHistoryItem(null)}
-                item={historyItem}
-            />
+            <HistoryModal open={!!historyItem} onClose={() => setHistoryItem(null)} item={historyItem} />
 
-            {/* Bulk Upload — UNCHANGED */}
             <BulkUploadModal
-                open={bulkOpen}
-                onClose={() => setBulkOpen(false)}
+                open={bulkOpen} onClose={() => setBulkOpen(false)}
                 title="Bulk Upload Inventory"
                 schemaFields={SCHEMA_FIELDS}
                 fieldValidators={FIELD_VALIDATORS}
                 onUpload={async (items, file) => {
-                    const action = await dispatch(bulkUploadInventory({
-                        file, martId: resolvedMartId, staffId,
-                    }))
+                    const action = await dispatch(bulkUploadInventory({ file, martId: resolvedMartId, staffId }))
                     return action.payload
                 }}
                 downloadCSVTemplate={downloadCSVTemplate}
@@ -1012,7 +1227,7 @@ export default function Inventory() {
                     if (e) { e.preventDefault(); e.stopPropagation() }
                     dispatch(fetchInventory(resolvedMartId))
                     dispatch(fetchInventorySummary(resolvedMartId))
-                    dispatch(fetchInventoryFiltered({ martId: resolvedMartId, ...filters }))
+                    dispatch(fetchInventoryFiltered({ martId: resolvedMartId, ...committedFilters }))
                 }}
             />
         </div>

@@ -25,10 +25,10 @@ export default function Drivers() {
     useEffect(() => { load() }, [martId])
 
     // Auto refresh every 30 seconds for live status
-    useEffect(() => {
-        const t = setInterval(load, 30000)
-        return () => clearInterval(t)
-    }, [martId])
+    // useEffect(() => {
+    //     const t = setInterval(load, 30000)
+    //     return () => clearInterval(t)
+    // }, [martId])
 
     const statusColor = { available: 'green', on_trip: 'yellow', offline: 'gray' }
 
@@ -53,7 +53,7 @@ export default function Drivers() {
         { key: 'vehicle', label: 'Vehicle', render: r => `${r.vehicleType} · ${r.vehicleNumber || '—'}` },
         { key: 'status', label: 'Status', render: r => <Badge variant={statusColor[r.status] || 'gray'}>{r.status || 'offline'}</Badge> },
         { key: 'total_deliveries', label: 'Deliveries', render: r => r.totalDeliveries || 0 },
-        { key: 'total_earnings', label: 'Earnings', render: r => `₹${r.totalEarnings || 0}` },  
+        { key: 'total_earnings', label: 'Earnings', render: r => `₹${r.totalEarnings || 0}` },
         {
             key: 'documents', label: 'Docs', render: r => (
                 <div className="flex gap-2">
