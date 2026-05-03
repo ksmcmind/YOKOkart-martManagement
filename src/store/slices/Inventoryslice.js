@@ -1,16 +1,18 @@
 // src/store/slices/inventorySlice.js
 //
-// Bulk upload flow (mirrors Products):
-//   1. Mart admin picks CSV/XLSX in BulkUploadModal
-//   2. File + martId are POSTed as multipart/form-data to /inventory/bulk
-//   3. Backend reads martId from the FormData, stamps every row,
-//      creates a BulkJob in Mongo, returns { jobId }
-//   4. Frontend polls /bulk-jobs/:jobId for progress
+// ROOT CAUSE OF ALL THREE BUGS:
 //
-// Added in this version:
-//   - fetchInventoryFiltered  → GET /inventory?martId=...&<filters>
-//   - fetchInventorySummary   → GET /inventory/summary/:martId
-//   martId key kept as-is (?martId=) everywhere to match existing backend
+//   fetchInventoryFiltered was calling:
+//     api.get(`/inventory?${params}`)          ← getAll controller
+//
+//   getAll:
+//     - ignores ALL filter params (martId is used but others are not)
+//     - returns res.data as a flat array  →  no .pagination key ever
+//     - so filteredItems showed 15 random items, filters had zero effect,
+//       and filteredPagination was always null (PaginationBar never rendered)
+//
+//   Fix: change to /inventory/filters which hits filterInventory controller
+//   that applies every filter and returns { data: [...], pagination: {...} }
 
 import { createSlice, createAsyncThunk, createSelector } from '@reduxjs/toolkit'
 import api from '../../api/index'
@@ -26,7 +28,7 @@ const normalizeDashboard = (raw) => ({
     low_stock_items: Array.isArray(raw?.low_stock_items) ? raw.low_stock_items : [],
 })
 
-// ── Fetch thunks ─────────────────────────────────────────────────────────────
+// ── Thunks ────────────────────────────────────────────────────────────────────
 
 export const fetchInventory = createAsyncThunk(
     'inventory/fetchAll',
@@ -42,33 +44,19 @@ export const fetchInventory = createAsyncThunk(
     }
 )
 
-/**
- * Filtered + paginated inventory fetch.
- *
- * Payload: {
- *   martId,                   // required — forwarded as ?martId=
- *   search, stock_unit,
- *   is_active, low_stock_only, out_of_stock,
- *   min_sale_price, max_sale_price,
- *   expiry_before, expiry_after, expiry_is_null,
- *   sort_by, sort_order,
- *   page, limit,
- * }
- *
- * NOTE: martId is intentionally kept as ?martId= to match your existing
- * backend convention used in fetchInventory above.
- */
 export const fetchInventoryFiltered = createAsyncThunk(
     'inventory/fetchFiltered',
     async (filters = {}, { rejectWithValue }) => {
         const { martId, ...rest } = filters
         if (!martId) return rejectWithValue('martId is required')
         try {
-            const params = new URLSearchParams({ martId })
+            const params = new URLSearchParams()
+            params.set('martId', martId)
             Object.entries(rest).forEach(([k, v]) => {
                 if (v !== '' && v !== null && v !== undefined) params.set(k, v)
             })
-            const res = await api.get(`/inventory?${params.toString()}`)
+            // ← FIXED: /inventory/filters not /inventory
+            const res = await api.get(`/inventory/filters?${params.toString()}`)
             if (!res.success) return rejectWithValue(res.message || 'Failed to load')
             return {
                 data: res.data || [],
@@ -80,10 +68,6 @@ export const fetchInventoryFiltered = createAsyncThunk(
     }
 )
 
-/**
- * Mart-level summary stats from the backend.
- * GET /inventory/summary/:martId
- */
 export const fetchInventorySummary = createAsyncThunk(
     'inventory/fetchSummary',
     async (martId, { rejectWithValue }) => {
@@ -111,8 +95,6 @@ export const fetchInventoryDashboard = createAsyncThunk(
         }
     }
 )
-
-// ── Single-item mutations ────────────────────────────────────────────────────
 
 export const addInventoryItem = createAsyncThunk(
     'inventory/add',
@@ -199,8 +181,6 @@ export const deleteInventoryItem = createAsyncThunk(
     }
 )
 
-// ── Audit / transactions ─────────────────────────────────────────────────────
-
 export const fetchItemTransactions = createAsyncThunk(
     'inventory/fetchItemTransactions',
     async ({ id, limit = 50 }, { rejectWithValue }) => {
@@ -233,8 +213,6 @@ export const fetchMartTransactions = createAsyncThunk(
         }
     }
 )
-
-// ── Bulk upload (UNCHANGED) ──────────────────────────────────────────────────
 
 export const bulkUploadInventory = createAsyncThunk(
     'inventory/bulkUpload',
@@ -278,14 +256,11 @@ export const pollBulkJob = createAsyncThunk(
 // ── Slice ─────────────────────────────────────────────────────────────────────
 
 const initialState = {
-    // Full list (unfiltered fetch)
     items: [], loading: false, error: null, lastFetchedMartId: null,
 
-    // Filtered list + pagination
     filteredItems: [], filteredLoading: false, filteredError: null,
-    filteredPagination: null,         // { total, page, limit, total_pages, has_next, has_prev }
+    filteredPagination: null,
 
-    // Backend summary stats
     summary: null, summaryLoading: false, summaryError: null,
 
     saving: false, restocking: false,
@@ -303,9 +278,7 @@ const inventorySlice = createSlice({
     initialState,
     reducers: {
         clearInventory: (s) => { s.items = []; s.lastFetchedMartId = null },
-        clearFilteredInventory: (s) => {
-            s.filteredItems = []; s.filteredPagination = null; s.filteredError = null
-        },
+        clearFilteredInventory: (s) => { s.filteredItems = []; s.filteredPagination = null; s.filteredError = null },
         clearDashboard: (s) => { s.dashboard = null; s.dashboardForMartId = null },
         clearBulkJob: (s) => { s.bulkJob = null },
         clearItemTxns: (s, a) => { delete s.itemTxns[a.payload] },
@@ -314,14 +287,10 @@ const inventorySlice = createSlice({
     },
     extraReducers: (builder) => {
         builder
-            // fetchInventory (unchanged)
             .addCase(fetchInventory.pending, (s) => { s.loading = true; s.error = null })
-            .addCase(fetchInventory.fulfilled, (s, a) => {
-                s.loading = false; s.items = a.payload; s.lastFetchedMartId = a.meta.arg
-            })
+            .addCase(fetchInventory.fulfilled, (s, a) => { s.loading = false; s.items = a.payload; s.lastFetchedMartId = a.meta.arg })
             .addCase(fetchInventory.rejected, (s, a) => { s.loading = false; s.error = a.payload })
 
-            // fetchInventoryFiltered
             .addCase(fetchInventoryFiltered.pending, (s) => { s.filteredLoading = true; s.filteredError = null })
             .addCase(fetchInventoryFiltered.fulfilled, (s, a) => {
                 s.filteredLoading = false
@@ -329,39 +298,30 @@ const inventorySlice = createSlice({
                 s.filteredPagination = a.payload.pagination
             })
             .addCase(fetchInventoryFiltered.rejected, (s, a) => {
-                s.filteredLoading = false; s.filteredError = a.payload; s.filteredItems = []
+                s.filteredLoading = false
+                s.filteredError = a.payload
+                s.filteredItems = []
             })
 
-            // fetchInventorySummary
             .addCase(fetchInventorySummary.pending, (s) => { s.summaryLoading = true; s.summaryError = null })
-            .addCase(fetchInventorySummary.fulfilled, (s, a) => {
-                s.summaryLoading = false; s.summary = a.payload
-            })
-            .addCase(fetchInventorySummary.rejected, (s, a) => {
-                s.summaryLoading = false; s.summaryError = a.payload; s.summary = null
-            })
+            .addCase(fetchInventorySummary.fulfilled, (s, a) => { s.summaryLoading = false; s.summary = a.payload })
+            .addCase(fetchInventorySummary.rejected, (s, a) => { s.summaryLoading = false; s.summaryError = a.payload; s.summary = null })
 
-            // fetchInventoryDashboard
             .addCase(fetchInventoryDashboard.pending, (s) => { s.dashboardLoading = true; s.dashboardError = null })
-            .addCase(fetchInventoryDashboard.fulfilled, (s, a) => {
-                s.dashboardLoading = false; s.dashboard = a.payload; s.dashboardForMartId = a.meta.arg
-            })
-            .addCase(fetchInventoryDashboard.rejected, (s, a) => {
-                s.dashboardLoading = false; s.dashboardError = a.payload; s.dashboard = null
-            })
+            .addCase(fetchInventoryDashboard.fulfilled, (s, a) => { s.dashboardLoading = false; s.dashboard = a.payload; s.dashboardForMartId = a.meta.arg })
+            .addCase(fetchInventoryDashboard.rejected, (s, a) => { s.dashboardLoading = false; s.dashboardError = a.payload; s.dashboard = null })
 
-            // addInventoryItem — push to both lists
             .addCase(addInventoryItem.pending, (s) => { s.saving = true })
             .addCase(addInventoryItem.fulfilled, (s, a) => {
                 s.saving = false
                 if (a.payload) {
                     s.items.unshift(a.payload)
                     s.filteredItems.unshift(a.payload)
+                    if (s.filteredPagination) s.filteredPagination.total += 1
                 }
             })
             .addCase(addInventoryItem.rejected, (s) => { s.saving = false })
 
-            // restockInventoryItem — sync to both lists
             .addCase(restockInventoryItem.pending, (s) => { s.restocking = true })
             .addCase(restockInventoryItem.fulfilled, (s, a) => {
                 s.restocking = false
@@ -376,7 +336,6 @@ const inventorySlice = createSlice({
             })
             .addCase(restockInventoryItem.rejected, (s) => { s.restocking = false })
 
-            // updateInventoryItem — sync to both lists
             .addCase(updateInventoryItem.fulfilled, (s, a) => {
                 const { id, patch, server } = a.payload
                 const apply = (arr) => {
@@ -398,9 +357,9 @@ const inventorySlice = createSlice({
             .addCase(deleteInventoryItem.fulfilled, (s, a) => {
                 s.items = s.items.filter(i => i.id !== a.payload)
                 s.filteredItems = s.filteredItems.filter(i => i.id !== a.payload)
+                if (s.filteredPagination) s.filteredPagination.total = Math.max(0, s.filteredPagination.total - 1)
             })
 
-            // Per-item txns
             .addCase(fetchItemTransactions.pending, (s) => { s.itemTxnsLoading = true })
             .addCase(fetchItemTransactions.fulfilled, (s, a) => {
                 s.itemTxnsLoading = false
@@ -408,16 +367,10 @@ const inventorySlice = createSlice({
             })
             .addCase(fetchItemTransactions.rejected, (s) => { s.itemTxnsLoading = false })
 
-            // Mart-wide txns
             .addCase(fetchMartTransactions.pending, (s) => { s.martTxnsLoading = true; s.martTxnsError = null })
-            .addCase(fetchMartTransactions.fulfilled, (s, a) => {
-                s.martTxnsLoading = false; s.martTxns = a.payload
-            })
-            .addCase(fetchMartTransactions.rejected, (s, a) => {
-                s.martTxnsLoading = false; s.martTxnsError = a.payload; s.martTxns = []
-            })
+            .addCase(fetchMartTransactions.fulfilled, (s, a) => { s.martTxnsLoading = false; s.martTxns = a.payload })
+            .addCase(fetchMartTransactions.rejected, (s, a) => { s.martTxnsLoading = false; s.martTxnsError = a.payload; s.martTxns = [] })
 
-            // Bulk upload (unchanged)
             .addCase(bulkUploadInventory.pending, (s) => { s.bulkUploading = true; s.bulkJob = null })
             .addCase(bulkUploadInventory.fulfilled, (s, a) => { s.bulkUploading = false; s.bulkJob = a.payload })
             .addCase(bulkUploadInventory.rejected, (s) => { s.bulkUploading = false })
@@ -429,6 +382,7 @@ export const {
     clearInventory, clearFilteredInventory, clearDashboard,
     clearBulkJob, clearItemTxns, clearMartTxns, clearSummary,
 } = inventorySlice.actions
+
 export default inventorySlice.reducer
 
 // ── Selectors ─────────────────────────────────────────────────────────────────
@@ -442,32 +396,26 @@ export const selectInventoryRestocking = (s) => root(s).restocking
 export const selectInventoryBulkUploading = (s) => root(s).bulkUploading
 export const selectInventoryBulkJob = (s) => root(s).bulkJob
 
-// Filtered
 export const selectFilteredItems = (s) => root(s).filteredItems
 export const selectFilteredLoading = (s) => root(s).filteredLoading
 export const selectFilteredError = (s) => root(s).filteredError
 export const selectFilteredPagination = (s) => root(s).filteredPagination
 
-// Summary
 export const selectInventorySummary = (s) => root(s).summary
 export const selectInventorySummaryLoading = (s) => root(s).summaryLoading
 
-// Dashboard
 export const selectInventoryDashboard = (s) => root(s).dashboard
 export const selectInventoryDashboardLoading = (s) => root(s).dashboardLoading
 export const selectInventoryDashboardError = (s) => root(s).dashboardError
 export const selectInventoryDashboardForMart = (s) => root(s).dashboardForMartId
 
-// Per-item txns
 export const selectItemTransactions = (s, id) => root(s).itemTxns[id] || []
 export const selectItemTransactionsLoading = (s) => root(s).itemTxnsLoading
 
-// Mart-wide txns
 export const selectMartTransactions = (s) => root(s).martTxns
 export const selectMartTransactionsLoading = (s) => root(s).martTxnsLoading
 export const selectMartTransactionsError = (s) => root(s).martTxnsError
 
-// Local stats (from full items list, same as before)
 export const selectInventoryStats = createSelector(
     [selectInventoryItems],
     (items) => ({
@@ -482,7 +430,6 @@ export const selectInventoryStats = createSelector(
     })
 )
 
-// Local client-side search filter (unchanged — used when NOT using backend filter)
 export const selectFilteredInventory = createSelector(
     [selectInventoryItems, (_s, search) => search],
     (items, search) => {
