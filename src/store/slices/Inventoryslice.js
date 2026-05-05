@@ -224,8 +224,8 @@ export const bulkUploadInventory = createAsyncThunk(
         try {
             const formData = new FormData()
             formData.append('file', file)
-            if (martId) formData.append('mongo_mart_id', martId)
-            if (staffId) formData.append('staff_id', staffId)
+            if (martId) formData.append('martid', martId)
+            if (staffId) formData.append('staffid', staffId)
             const res = await api.post('/inventory/bulk', formData)
             if (!res.success) {
                 dispatch(showToast({ message: res.message || 'Bulk upload failed', type: 'error' }))
