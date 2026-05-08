@@ -26,7 +26,7 @@ import {
     selectFilteredPagination,
     selectInventorySummary,
     selectInventorySummaryLoading,
-} from '../store/slices/Inventoryslice'
+} from '../store/slices/inventorySlice'
 import { showToast } from '../store/slices/uiSlice'
 import PageHeader from '../components/PageHeader'
 import Button from '../components/Button'
@@ -258,8 +258,8 @@ function FilterBar({ committedFilters, onSearch, onReset, loading }) {
                 <button
                     onClick={() => setExpanded(e => !e)}
                     className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl border transition-all shrink-0 ${expanded
-                        ? 'bg-primary-600 border-primary-600 text-white'
-                        : 'bg-gray-50 border-gray-200 text-gray-600 hover:border-primary-300 hover:text-primary-600'
+                            ? 'bg-primary-600 border-primary-600 text-white'
+                            : 'bg-gray-50 border-gray-200 text-gray-600 hover:border-primary-300 hover:text-primary-600'
                         }`}
                 >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -315,8 +315,8 @@ function FilterBar({ committedFilters, onSearch, onReset, loading }) {
                                 {STOCK_STATUS_OPTIONS.map(opt => (
                                     <button key={opt.value} onClick={() => setStatus(opt.value)}
                                         className={`w-full text-left text-xs px-3 py-2 rounded-lg border font-medium transition-all ${statusVal === opt.value
-                                            ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
-                                            : 'bg-white border-gray-200 text-gray-600 hover:border-primary-200 hover:bg-primary-50/50'
+                                                ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
+                                                : 'bg-white border-gray-200 text-gray-600 hover:border-primary-200 hover:bg-primary-50/50'
                                             }`}>
                                         {opt.label}
                                     </button>
@@ -331,8 +331,8 @@ function FilterBar({ committedFilters, onSearch, onReset, loading }) {
                                 {['', ...UNITS].map(u => (
                                     <button key={u || 'all'} onClick={() => set('stock_unit', u)}
                                         className={`text-xs py-2 px-1 rounded-lg border font-medium transition-all ${draft.stock_unit === u
-                                            ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
-                                            : 'bg-white border-gray-200 text-gray-600 hover:border-primary-200 hover:bg-primary-50/50'
+                                                ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
+                                                : 'bg-white border-gray-200 text-gray-600 hover:border-primary-200 hover:bg-primary-50/50'
                                             }`}>
                                         {u || 'All'}
                                     </button>
@@ -449,8 +449,8 @@ function PaginationBar({ pagination, onPageChange }) {
                         ? <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
                         : <button key={p} onClick={() => onPageChange(p)}
                             className={`w-8 h-8 text-xs font-semibold rounded-lg border transition-colors ${p === page
-                                ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
-                                : 'border-gray-200 text-gray-600 hover:border-primary-300 hover:text-primary-600'
+                                    ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
+                                    : 'border-gray-200 text-gray-600 hover:border-primary-300 hover:text-primary-600'
                                 }`}>
                             {p}
                         </button>
@@ -867,17 +867,14 @@ export default function Inventory() {
         },
         {
             key: 'status', label: 'Active',
-            render: r => {
-                const isActive = r.is_active === true || r.is_active === 'true'
-                return (
-                    <div className="flex items-center justify-center">
-                        <button onClick={e => { e.stopPropagation(); dispatch(toggleInventoryActive(r)) }}
-                            className={`w-7 h-4 rounded-full transition-all duration-200 relative ${isActive ? 'bg-green-500 shadow-sm' : 'bg-gray-300'}`}>
-                            <span className={`absolute top-0.5 left-0.5 block w-3 h-3 rounded-full bg-white transition-transform duration-200 ${isActive ? 'translate-x-3' : 'translate-x-0'}`} />
-                        </button>
-                    </div>
-                )
-            },
+            render: r => (
+                <div className="flex items-center justify-center">
+                    <button onClick={e => { e.stopPropagation(); dispatch(toggleInventoryActive(r)) }}
+                        className={`w-7 h-4 rounded-full transition-all duration-200 relative ${r.is_active ? 'bg-green-500 shadow-sm' : 'bg-gray-300'}`}>
+                        <span className={`absolute top-0.5 left-0.5 block w-3 h-3 rounded-full bg-white transition-transform duration-200 ${r.is_active ? 'translate-x-3' : 'translate-x-0'}`} />
+                    </button>
+                </div>
+            ),
         },
         {
             key: 'actions', label: '',

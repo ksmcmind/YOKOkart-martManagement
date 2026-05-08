@@ -1,22 +1,23 @@
-// src/pages/Staff.jsx
+// src/pages/Staff.jsx — mart_admin / manager view
+// martId locked from auth token. PAN + Aadhaar mandatory. Uses Redux staffSlice.
+
 import { useEffect, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import {
     fetchStaff, createStaff, toggleStaffStatus,
     selectAllStaff, selectStaffLoading,
 } from '../store/slices/staffSlice'
-import { fetchMarts, selectAllMarts } from '../store/slices/martSlice'
 import { showToast } from '../store/slices/uiSlice'
 import PageHeader from '../components/PageHeader'
 import Button from '../components/Button'
-import Grid from '../components/Grid'
+import Table from '../components/Table'
 import Modal from '../components/Modal'
 import Badge from '../components/Badge'
 import Input, { Select } from '../components/Input'
 import ImageUpload from '../components/ImageUpload'
+import useAuth from '../hooks/useAuth'
 
 const ROLES = [
-    { value: 'mart_admin', label: 'Mart Admin' },
     { value: 'manager', label: 'Manager' },
     { value: 'dispatcher', label: 'Dispatcher' },
     { value: 'stock_manager', label: 'Stock Manager' },
@@ -27,9 +28,10 @@ const ROLES = [
 ]
 
 const EMPTY = {
-    name: '', phone: '', email: '', role: 'mart_admin',
-    martId: '', basicSalary: '',
-    profileImageFile: null, panImageFile: null, aadhaarImageFile: null,
+    name: '', phone: '', email: '', role: 'manager', basicSalary: '',
+    profileImageFile: null,  // File | null  — optional
+    panImageFile: null,  // File | null  — REQUIRED
+    aadhaarImageFile: null,  // File | null  — REQUIRED
 }
 
 const toBase64 = (file) =>
@@ -42,81 +44,74 @@ const toBase64 = (file) =>
 
 export default function Staff() {
     const dispatch = useDispatch()
+    const { martId } = useAuth()   // from localStorage ksmcm_user
+    console.log('martId:', martId)
     const staff = useSelector(selectAllStaff)
     const loading = useSelector(selectStaffLoading)
-    const marts = useSelector(selectAllMarts)
 
     const [open, setOpen] = useState(false)
-    const [editingStaff, setEditingStaff] = useState(null)
     const [form, setForm] = useState(EMPTY)
     const [saving, setSaving] = useState(false)
-    const [martFilter, setMartFilter] = useState('')
 
     useEffect(() => {
-        dispatch(fetchMarts())
-        dispatch(fetchStaff())
-    }, [dispatch])
+        if (martId) dispatch(fetchStaff(martId))
+    }, [martId, dispatch])
 
     const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
-    const handleEdit = (s) => {
-        setEditingStaff(s)
-        setForm({
-            ...EMPTY,
-            name: s.name,
-            phone: s.phone,
-            email: s.email || '',
-            role: s.role,
-            martId: s.pg_mart_id || '', // Use pg_mart_id for assignment
-            basicSalary: String(s.basic_salary || ''),
-        })
-        setOpen(true)
-    }
+    const handleClose = () => { setOpen(false); setForm(EMPTY) }
 
-    const handleSave = async () => {
+    const handleCreate = async () => {
+        // Field validation
         if (!form.name || !form.phone) {
-            dispatch(showToast({ message: 'Name and phone required', type: 'error' })); return
+            dispatch(showToast({ message: 'Name and phone are required', type: 'error' }))
+            return
         }
-        if (form.role !== 'super_admin' && !form.martId) {
-            dispatch(showToast({ message: 'Mart required for this role', type: 'error' })); return
-        }
-
-        // Mandatory images for new staff
-        if (!editingStaff && (!form.profileImageFile || !form.panImageFile || !form.aadhaarImageFile)) {
-            dispatch(showToast({ message: 'Profile Photo, PAN Card, and Aadhaar Card are all mandatory', type: 'error' })); return
+        // PAN + Aadhaar mandatory
+        if (!form.panImageFile || !form.aadhaarImageFile) {
+            dispatch(showToast({ message: 'PAN and Aadhaar are required', type: 'error' }))
+            return
         }
 
         setSaving(true)
         try {
             const [profileImage, panImage, aadhaarImage] = await Promise.all([
                 form.profileImageFile ? toBase64(form.profileImageFile) : Promise.resolve(null),
-                form.panImageFile ? toBase64(form.panImageFile) : Promise.resolve(null),
-                form.aadhaarImageFile ? toBase64(form.aadhaarImageFile) : Promise.resolve(null),
+                toBase64(form.panImageFile),
+                toBase64(form.aadhaarImageFile),
             ])
 
-            const payload = {
+            const res = await dispatch(createStaff({
                 name: form.name,
                 phone: form.phone,
                 email: form.email,
                 role: form.role,
-                martId: form.martId || null,
+                mongoMartId: martId, // ← always from token, never from form
                 basicSalary: parseFloat(form.basicSalary) || 0,
-                ...(profileImage && { profileImage }),
-                ...(panImage && { panImage }),
-                ...(aadhaarImage && { aadhaarImage }),
-            }
-
-            const action = editingStaff ? updateStaff({ id: editingStaff.id, data: payload }) : createStaff(payload)
-            const res = await dispatch(action)
+                profileImage,
+                panImage,
+                aadhaarImage,
+            }))
 
             if (!res.error) {
-                dispatch(showToast({ message: editingStaff ? 'Staff updated!' : 'Staff created!', type: 'success' }))
-                setOpen(false); setForm(EMPTY); setEditingStaff(null)
+                dispatch(showToast({ message: 'Staff added!', type: 'success' }))
+                handleClose()
+            } else {
+                dispatch(showToast({ message: res.payload || 'Failed', type: 'error' }))
             }
         } catch (err) {
-            dispatch(showToast({ message: err.message, type: 'error' }))
+            dispatch(showToast({ message: err?.message || 'Failed', type: 'error' }))
         } finally {
             setSaving(false)
+        }
+    }
+
+    const handleToggle = async (id) => {
+        const res = await dispatch(toggleStaffStatus(id))
+        if (!res.error) {
+            dispatch(showToast({ message: 'Status updated', type: 'success' }))
+        } else {
+            dispatch(showToast({ message: res.payload || 'Update failed', type: 'error' }))
         }
     }
 
@@ -124,114 +119,169 @@ export default function Staff() {
         {
             key: 'name', label: 'Staff',
             render: r => (
-                <div className="flex items-center gap-2 py-1">
-                    <div className="w-8 h-8 rounded-full bg-primary-100 flex items-center justify-center overflow-hidden shrink-0 border border-primary-200">
-                        {r.profile_image ? <img src={r.profile_image} className="w-full h-full object-cover" alt="" /> : <span className="text-xs font-bold text-primary-600">{r.name?.charAt(0)?.toUpperCase()}</span>}
-                    </div>
-                    <div className="leading-tight">
-                        <p className="text-xs font-bold text-gray-900">{r.name}</p>
-                        <p className="text-[10px] text-gray-500 font-mono">{r.phone}</p>
+                <div className="flex items-center gap-2">
+                    {r.profile_img_url ? (
+                        <img src={r.profile_img_url} className="w-8 h-8 rounded-full object-cover" alt="" />
+                    ) : (
+                        <div className="w-8 h-8 rounded-full bg-primary-100 flex items-center justify-center text-primary-600 text-xs font-bold">
+                            {r.name?.charAt(0)?.toUpperCase() || '?'}
+                        </div>
+                    )}
+                    <div>
+                        <p className="font-medium text-gray-900">{r.name}</p>
+                        <p className="text-xs text-gray-400">{r.phone}</p>
                     </div>
                 </div>
-            )
+            ),
         },
-        { key: 'role', label: 'Role', render: r => <Badge variant="blue" size="xs">{r.role?.replace(/_/g, ' ').toUpperCase()}</Badge> },
-        { key: 'status', label: 'Status', render: r => <Badge variant={r.is_active ? 'success' : 'gray'} size="xs">{r.is_active ? 'ACTIVE' : 'INACTIVE'}</Badge> },
         {
-            key: 'mart', label: 'Mart',
-            render: r => {
-                if (!r.mongo_mart_id) return <span className="text-[9px] bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded font-black uppercase tracking-tighter border border-purple-100">Super Admin</span>
-                const m = marts.find(m => m.mongo_mart_id === r.mongo_mart_id)
-                return <span className="text-[10px] text-gray-500 font-medium">{m?.name || '—'}</span>
-            }
+            key: 'role', label: 'Role',
+            render: r => <Badge variant="blue">{r.role?.replace(/_/g, ' ')}</Badge>,
         },
-        { key: 'salary', label: 'Salary', render: r => <span className="text-xs font-bold text-gray-700">₹{parseFloat(r.basic_salary || 0).toLocaleString()}</span> },
         {
-            key: 'actions', label: '',
+            key: 'is_active', label: 'Status',
             render: r => (
-                <div className="flex justify-end gap-2">
-                    <button onClick={() => handleEdit(r)} className="text-[10px] text-gray-600 font-black hover:bg-gray-100 px-2 py-1 rounded transition-colors uppercase tracking-tighter">Edit</button>
-                    <button onClick={() => dispatch(toggleStaffStatus(r.id))} className={`text-[10px] font-black px-2 py-1 rounded transition-colors uppercase tracking-tighter ${r.is_active ? 'text-red-600 hover:bg-red-50' : 'text-green-600 hover:bg-green-50'}`}>
-                        {r.is_active ? 'Disable' : 'Enable'}
-                    </button>
+                <Badge variant={r.is_active ? 'green' : 'gray'}>
+                    {r.is_active ? 'Active' : 'Inactive'}
+                </Badge>
+            ),
+        },
+        {
+            key: 'basic_salary', label: 'Salary',
+            render: r => r.basic_salary ? `₹${parseFloat(r.basic_salary).toLocaleString()}` : '—',
+        },
+        {
+            key: 'kyc_docs', label: 'Docs',
+            render: r => (
+                <div className="flex gap-1">
+                    {r.kyc_docs?.pan && (
+                        <a href={r.kyc_docs.pan} target="_blank" rel="noreferrer"
+                            className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded text-xs hover:bg-blue-100">
+                            PAN
+                        </a>
+                    )}
+                    {r.kyc_docs?.aadhaar && (
+                        <a href={r.kyc_docs.aadhaar} target="_blank" rel="noreferrer"
+                            className="px-2 py-0.5 bg-green-50 text-green-600 rounded text-xs hover:bg-green-100">
+                            Aadhaar
+                        </a>
+                    )}
+                    {!r.kyc_docs?.pan && !r.kyc_docs?.aadhaar && (
+                        <span className="text-xs text-gray-300">—</span>
+                    )}
                 </div>
-            )
-        }
+            ),
+        },
+        {
+            key: 'actions', label: 'Actions',
+            render: r => (
+                <Button
+                    variant={r.is_active ? 'danger' : 'primary'}
+                    size="sm"
+                    onClick={() => handleToggle(r.id)}
+                >
+                    {r.is_active ? 'Deactivate' : 'Activate'}
+                </Button>
+            ),
+        },
     ]
 
-    const filtered = martFilter ? staff.filter(s => s.mongo_mart_id === martFilter) : staff
-
     return (
-        <div className="p-4 sm:p-6 space-y-4">
+        <div>
             <PageHeader
                 title="Staff"
-                subtitle="Manage organization workforce"
-                action={<Button variant="primary" onClick={() => { setForm(EMPTY); setEditingStaff(null); setOpen(true) }}>+ Add Staff Member</Button>}
+                subtitle="Manage your mart staff"
+                action={<Button variant="primary" onClick={() => { setForm(EMPTY); setOpen(true) }}>+ Add Staff</Button>}
             />
 
-            <Grid
-                columns={columns}
-                data={filtered}
-                loading={loading}
-                searchKey="name"
-                actions={
-                    <div className="flex gap-1 overflow-x-auto pb-2 scrollbar-hide max-w-xl">
-                        <button onClick={() => setMartFilter('')} className={`px-3 py-1 rounded-full text-[10px] font-bold whitespace-nowrap transition-colors ${!martFilter ? 'bg-primary-600 text-white shadow-md shadow-primary-200' : 'bg-white border border-gray-200 text-gray-500 hover:bg-gray-50'}`}>ALL STAFF</button>
-                        {marts.map(m => (
-                            <button key={m.mongo_mart_id} onClick={() => setMartFilter(m.mongo_mart_id)} className={`px-3 py-1 rounded-full text-[10px] font-bold whitespace-nowrap transition-colors ${martFilter === m.mongo_mart_id ? 'bg-primary-600 text-white shadow-md shadow-primary-200' : 'bg-white border border-gray-200 text-gray-500 hover:bg-gray-50'}`}>{m.name.toUpperCase()}</button>
-                        ))}
-                    </div>
+            <div className="card">
+                <Table columns={columns} data={staff} loading={loading} emptyText="No staff added yet." />
+            </div>
+
+            <Modal
+                title="Add Staff Member"
+                open={open}
+                onClose={handleClose}
+                size="lg"
+                footer={
+                    <>
+                        <Button variant="secondary" onClick={handleClose}>Cancel</Button>
+                        <Button variant="primary" loading={saving} onClick={handleCreate}>
+                            {saving ? 'Saving...' : 'Add Staff'}
+                        </Button>
+                    </>
                 }
-            />
+            >
+                <ImageUpload
+                    label="Profile Photo (optional)"
+                    value={form.profileImageFile}
+                    onChange={file => set('profileImageFile', file)}
+                />
 
-            <Modal open={open} onClose={() => { setOpen(false); setEditingStaff(null); setForm(EMPTY) }} title={editingStaff ? `Edit Staff: ${editingStaff.name}` : "Add Staff Member"} size="lg"
-                footer={<><Button variant="secondary" onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={saving} onClick={handleSave}>{editingStaff ? 'Update Staff' : 'Create Staff'}</Button></>}>
-                <div className="space-y-8">
-                    <section className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                        <h4 className="text-[10px] font-black text-primary-600 uppercase tracking-widest mb-4 flex items-center gap-2">
-                            <span className="w-4 h-4 bg-primary-100 rounded-full flex items-center justify-center text-[8px]">1</span>
-                            Identity Details
-                        </h4>
-                        <div className="flex flex-col md:flex-row gap-6">
-                            <div className="shrink-0">
-                                <ImageUpload label="Profile Photo *" value={form.profileImageFile} onChange={file => set('profileImageFile', file)} />
-                            </div>
-                            <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <Input label="Full Name *" placeholder="Ravi Kumar" value={form.name} onChange={e => set('name', e.target.value)} />
-                                <Input label="Phone *" placeholder="10-digit mobile" value={form.phone} onChange={e => set('phone', e.target.value.replace(/\D/g, '').slice(0, 10))} />
-                                <Input label="Email Address" placeholder="ravi@example.com" value={form.email} onChange={e => set('email', e.target.value)} />
-                                <Input label="Basic Salary (₹)" type="number" placeholder="15000" value={form.basicSalary} onChange={e => set('basicSalary', e.target.value)} />
-                            </div>
-                        </div>
-                    </section>
+                <div className="form-grid-2">
+                    <Input
+                        label="Full Name" required
+                        value={form.name}
+                        onChange={e => set('name', e.target.value)}
+                        placeholder="Ravi Kumar"
+                    />
+                    <Input
+                        label="Phone" required
+                        value={form.phone}
+                        onChange={e => set('phone', e.target.value.replace(/\D/g, '').slice(0, 10))}
+                        placeholder="9876543210"
+                    />
+                    <Input
+                        label="Email"
+                        value={form.email}
+                        onChange={e => set('email', e.target.value)}
+                        placeholder="ravi@example.com"
+                    />
+                    <Input
+                        label="Basic Salary (₹)" type="number"
+                        value={form.basicSalary}
+                        onChange={e => set('basicSalary', e.target.value)}
+                        placeholder="15000"
+                    />
+                    <Select
+                        label="Role" required
+                        value={form.role}
+                        onChange={e => set('role', e.target.value)}
+                    >
+                        {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                    </Select>
+                    {/* No mart select — locked to token */}
+                </div>
 
-                    <section className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                        <h4 className="text-[10px] font-black text-primary-600 uppercase tracking-widest mb-4 flex items-center gap-2">
-                            <span className="w-4 h-4 bg-primary-100 rounded-full flex items-center justify-center text-[8px]">2</span>
-                            Role & Assignment
-                        </h4>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <Select label="System Role *" value={form.role} onChange={e => set('role', e.target.value)}>
-                                {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
-                            </Select>
-                            <Select label="Assign to Mart *" value={form.martId} onChange={e => set('martId', e.target.value)}>
-                                <option value="">Select Mart</option>
-                                {marts.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-                            </Select>
+                {/* KYC — PAN and Aadhaar are mandatory */}
+                <div className="mt-4 p-4 bg-gray-50 rounded-lg space-y-3">
+                    <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                        KYC Documents <span className="text-red-500">* Required</span>
+                    </p>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className={`p-3 rounded-lg border ${form.panImageFile ? 'border-primary-200 bg-primary-50' : 'border-red-200 bg-red-50'
+                            }`}>
+                            <ImageUpload
+                                label="PAN Card *"
+                                value={form.panImageFile}
+                                onChange={file => set('panImageFile', file)}
+                            />
+                            {!form.panImageFile && (
+                                <p className="text-xs text-red-500 mt-1">Required</p>
+                            )}
                         </div>
-                    </section>
-
-                    <section className="bg-gray-50/50 p-6 rounded-2xl border border-gray-100 shadow-sm">
-                        <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                            <span className="w-4 h-4 bg-gray-200 rounded-full flex items-center justify-center text-[8px]">3</span>
-                            KYC Verification
-                        </h4>
-                        {!editingStaff && <p className="text-[10px] text-red-500 mb-4 font-black tracking-tighter">* BOTH PAN AND AADHAAR ARE REQUIRED FOR REGISTRATION</p>}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <ImageUpload label="PAN Card *" value={form.panImageFile} onChange={file => set('panImageFile', file)} />
-                            <ImageUpload label="Aadhaar Card *" value={form.aadhaarImageFile} onChange={file => set('aadhaarImageFile', file)} />
+                        <div className={`p-3 rounded-lg border ${form.aadhaarImageFile ? 'border-primary-200 bg-primary-50' : 'border-red-200 bg-red-50'
+                            }`}>
+                            <ImageUpload
+                                label="Aadhaar Card *"
+                                value={form.aadhaarImageFile}
+                                onChange={file => set('aadhaarImageFile', file)}
+                            />
+                            {!form.aadhaarImageFile && (
+                                <p className="text-xs text-red-500 mt-1">Required</p>
+                            )}
                         </div>
-                    </section>
+                    </div>
                 </div>
             </Modal>
         </div>

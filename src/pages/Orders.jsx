@@ -27,9 +27,8 @@ import {
 } from '../store/slices/orderSlice'
 import {
     fetchAvailableDrivers,
-    fetchDrivers,
-    selectAllDrivers,
-    selectDriversLoading,
+    selectAvailableDrivers,
+    selectAvailableDriversLoading,
 } from '../store/slices/driverSlice'
 import { showToast } from '../store/slices/uiSlice'
 import PageHeader from '../components/PageHeader'
@@ -86,8 +85,8 @@ const fmtDateTime = (iso) => {
 // ─────────────────────────────────────────────────────────────────────────────
 function DriverPicker({ orderId, martId, onAssigned }) {
     const dispatch = useDispatch()
-    const drivers = useSelector(selectAllDrivers)
-    const loading = useSelector(selectDriversLoading)
+    const drivers = useSelector(selectAvailableDrivers)
+    const loading = useSelector(selectAvailableDriversLoading)
     const [driverId, setDriverId] = useState('')
     const [busy, setBusy] = useState(false)
 
@@ -128,7 +127,7 @@ function DriverPicker({ orderId, martId, onAssigned }) {
             >
                 <option value="">{loading ? 'Loading…' : 'Pick driver'}</option>
                 {drivers.map(d => (
-                    <option key={d.id} value={d.id} >
+                    <option key={d.id} value={d.id}>
                         {d.name}{d.vehicle_number ? ` · ${d.vehicle_number}` : ''}
                     </option>
                 ))}

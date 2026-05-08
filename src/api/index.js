@@ -1,7 +1,5 @@
 // src/api/index.js
-const BASE_URL = 'http://localhost:3000/api'
-
-// import.meta.env.VITE_API_URL ||
+const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api'
 
 // Ensure this key matches exactly what you see in your Browser's Application tab
 export const getToken = () => localStorage.getItem('ksmcm_token') || ''
@@ -12,19 +10,19 @@ const request = async (method, path, body = null) => {
 
     const options = {
         method,
-        credentials: 'include',
+        credentials: 'include', 
         headers: {
             ...(!isFormData && { 'Content-Type': 'application/json' }),
             'X-Client-Type': 'web',
             // 2. ADD THE AUTHORIZATION HEADER MANUALLY
-            ...(token && { 'Authorization': `Bearer ${token}` }),
+            ...(token && { 'Authorization': `Bearer ${token}` }), 
         },
     }
 
     if (body) options.body = isFormData ? body : JSON.stringify(body)
 
     const res = await fetch(`${BASE_URL}${path}`, options)
-
+    
     // Safety check: if response is not JSON (like a 500 error page), res.json() will crash
     let data;
     try {
