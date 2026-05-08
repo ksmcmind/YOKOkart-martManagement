@@ -1,518 +1,589 @@
 // src/pages/Orders.jsx
-import { useEffect, useState, useCallback } from 'react'
+//
+// Mart-side order management.
+// Status flow handled here:
+//   pending → confirmed → preparing → packed → assigned → picked_up → out_for_delivery → delivered
+//                                       ↑
+//                              Driver dropdown appears here
+//   any state (before delivered) → cancelled (stock auto-returned by backend)
+
+import { useEffect, useMemo, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import {
-    fetchOrders, fetchOrderById, updateOrderStatus,
-    selectAllOrders, selectOrderLoading, selectOrderPagination
+    fetchOrders,
+    fetchOrderStats,
+    fetchOrderDetail,
+    confirmOrder,
+    updateOrderStatus,
+    cancelOrder,
+    assignDriver,
+    packOrderItem,
+    selectAllOrders,
+    selectOrderLoading,
+    selectOrderStats,
+    selectOrderDetail,
+    selectOrderDetailLoading,
+    clearOrderDetail,
 } from '../store/slices/orderSlice'
-import { fetchMarts } from '../store/slices/martSlice'
+import {
+    fetchAvailableDrivers,
+    fetchDrivers,
+    selectAllDrivers,
+    selectDriversLoading,
+} from '../store/slices/driverSlice'
 import { showToast } from '../store/slices/uiSlice'
 import PageHeader from '../components/PageHeader'
 import Button from '../components/Button'
-import Table from '../components/Table'
+import Grid from '../components/Grid'
 import Modal from '../components/Modal'
 import Badge from '../components/Badge'
-import MartSelector from '../pages/MartSelector'
-import useMart from '../hooks/useMart'
-import api from '../api/index'
-import {
-    fetchAvailableDrivers,
-    assignDriverToOrder,
-    selectAvailableDrivers,
-} from '../store/slices/driverSlice'
-// ── Status flow — matches backend VALID_STATUSES ──────────────
-const STATUS_FLOW = {
-    pending: { next: 'confirmed', label: '✓ Confirm', color: 'blue' },
-    confirmed: { next: 'packed', label: '📦 Mark Packed', color: 'purple' },
-    packed: { next: null, label: '🚗 Assign Driver', color: 'orange', special: 'assign' },
-    assigned: { next: 'out_for_delivery', label: '▶ Start Trip', color: 'yellow' },
-    out_for_delivery: { next: 'delivered', label: '✅ Delivered', color: 'green' },
+import Input from '../components/Input'
+import useAuth from '../hooks/useAuth'
+
+// ── Status flow ──────────────────────────────────────────────────────────────
+// What is the next "advance" action available from each status?
+// When status === 'packed' we don't show "next" here — we show the driver dropdown.
+const NEXT_ACTION = {
+    pending: { next: 'confirmed', label: 'Confirm', color: 'primary' },
+    confirmed: { next: 'preparing', label: 'Start Preparing', color: 'primary' },
+    preparing: { next: 'packed', label: 'Mark Ready', color: 'warning' },
+    // packed → custom (driver dropdown)
+    assigned: { next: 'picked_up', label: 'Picked Up', color: 'primary' },
+    picked_up: { next: 'out_for_delivery', label: 'Out for Delivery', color: 'primary' },
+    out_for_delivery: { next: 'delivered', label: 'Delivered', color: 'primary' },
 }
 
-const STATUS_BADGE = {
-    pending: 'yellow',
-    confirmed: 'blue',
-    packed: 'purple',
-    assigned: 'orange',
-    out_for_delivery: 'blue',
-    delivered: 'green',
-    cancelled: 'red',
-    refunded: 'red',
-    preparing: 'purple',
-}
-
-const STATUSES = [
-    '', 'pending', 'confirmed', 'packed', 'assigned',
-    'out_for_delivery', 'delivered', 'cancelled', 'refunded'
+const STATUS_TABS = [
+    '', 'pending', 'confirmed', 'preparing', 'packed',
+    'assigned', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled',
 ]
 
-const fmtDate = (iso) => !iso ? '—' : new Date(iso).toLocaleString('en-IN', {
-    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true
-})
-
-// ── FilterBar ─────────────────────────────────────────────────
-function FilterBar({ committedFilters, onSearch, onReset, loading }) {
-    const [draft, setDraft] = useState(committedFilters)
-    useEffect(() => { setDraft(committedFilters) }, [committedFilters])
-
-    const set = (k, v) => setDraft(f => ({ ...f, [k]: v }))
-    const commit = () => onSearch({ ...draft, page: 1 })
-    const reset = () => { setDraft({ status: '', search: '', orderType: '', startDate: '', endDate: '' }); onReset() }
-    const onEnter = e => { if (e.key === 'Enter') commit() }
-
-    return (
-        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
-            <div className="flex gap-2 p-3 flex-wrap">
-                {/* Search */}
-                <div className="relative flex-1 min-w-[180px]">
-                    <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                    </svg>
-                    <input
-                        value={draft.search || ''}
-                        onChange={e => set('search', e.target.value)}
-                        onKeyDown={onEnter}
-                        placeholder="Search Order ID…"
-                        className="w-full text-xs pl-8 pr-3 py-2.5 border border-gray-200 rounded-xl focus:ring-4 focus:ring-green-500/10 focus:border-green-500 focus:outline-none transition-all bg-gray-50 focus:bg-white placeholder-gray-400"
-                    />
-                </div>
-
-                {/* Status */}
-                <select
-                    value={draft.status || ''}
-                    onChange={e => set('status', e.target.value)}
-                    className="text-xs border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 outline-none focus:border-green-500 min-w-[130px]"
-                >
-                    <option value="">All Statuses</option>
-                    {STATUSES.filter(Boolean).map(s => (
-                        <option key={s} value={s}>{s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</option>
-                    ))}
-                </select>
-
-                {/* Type */}
-                <select
-                    value={draft.orderType || ''}
-                    onChange={e => set('orderType', e.target.value)}
-                    className="text-xs border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 outline-none focus:border-green-500 min-w-[110px]"
-                >
-                    <option value="">All Types</option>
-                    <option value="delivery">Delivery</option>
-                    <option value="pos">POS</option>
-                </select>
-
-                {/* Date range */}
-                <div className="flex items-center gap-1.5 px-3 border border-gray-200 rounded-xl bg-gray-50 shrink-0">
-                    <svg className="w-3 h-3 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                    <input type="date" value={draft.startDate || ''} onChange={e => set('startDate', e.target.value)}
-                        className="text-xs bg-transparent outline-none py-2 text-gray-700 cursor-pointer" />
-                    <span className="text-gray-400 text-xs">→</span>
-                    <input type="date" value={draft.endDate || ''} onChange={e => set('endDate', e.target.value)}
-                        className="text-xs bg-transparent outline-none py-2 text-gray-700 cursor-pointer" />
-                </div>
-
-                <Button variant="primary" size="sm" onClick={commit} loading={loading}>Search</Button>
-                <Button variant="secondary" size="sm" onClick={reset} disabled={loading}>Reset</Button>
-            </div>
-        </div>
-    )
+const STATUS_BADGE_COLOR = {
+    pending: 'yellow',
+    confirmed: 'blue',
+    preparing: 'blue',
+    packed: 'purple',
+    assigned: 'purple',
+    picked_up: 'purple',
+    out_for_delivery: 'purple',
+    delivered: 'green',
+    cancelled: 'red',
+    refunded: 'gray',
 }
 
-// ── PaginationBar ─────────────────────────────────────────────
-function PaginationBar({ pagination, onPageChange }) {
-    if (!pagination || pagination.totalPages <= 1) return null
-    const { page, totalPages, total, limit } = pagination
-    const from = (page - 1) * (limit || 20) + 1
-    const to = Math.min(page * (limit || 20), total)
-
-    const getPages = () => {
-        if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1)
-        const pages = [1]
-        if (page > 3) pages.push('...')
-        for (let i = Math.max(2, page - 1); i <= Math.min(totalPages - 1, page + 1); i++) pages.push(i)
-        if (page < totalPages - 2) pages.push('...')
-        pages.push(totalPages)
-        return pages
-    }
-
-    return (
-        <div className="flex items-center justify-between py-3 px-1 border-t border-gray-100 mt-1">
-            <span className="text-xs text-gray-500">
-                Showing <span className="font-semibold text-gray-700">{from}–{to}</span> of{' '}
-                <span className="font-semibold text-gray-700">{total}</span> orders
-            </span>
-            <div className="flex items-center gap-1">
-                <button onClick={() => onPageChange(page - 1)} disabled={page <= 1}
-                    className="px-2.5 py-1.5 text-xs font-semibold border border-gray-200 rounded-lg hover:border-primary-300 hover:text-primary-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-                    ← Prev
-                </button>
-                {getPages().map((p, i) =>
-                    p === '...'
-                        ? <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
-                        : <button key={p} onClick={() => onPageChange(p)}
-                            className={`w-8 h-8 text-xs font-semibold rounded-lg border transition-colors ${p === page
-                                ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
-                                : 'border-gray-200 text-gray-600 hover:border-primary-300 hover:text-primary-600'
-                                }`}>{p}</button>
-                )}
-                <button onClick={() => onPageChange(page + 1)} disabled={page >= totalPages}
-                    className="px-2.5 py-1.5 text-xs font-semibold border border-gray-200 rounded-lg hover:border-primary-300 hover:text-primary-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-                    Next →
-                </button>
-            </div>
-        </div>
-    )
+const fmtDateTime = (iso) => {
+    if (!iso) return '—'
+    return new Date(iso).toLocaleString('en-IN', {
+        day: '2-digit', month: 'short',
+        hour: '2-digit', minute: '2-digit', hour12: true,
+    })
 }
 
-// ── AssignDriverModal ─────────────────────────────────────────
-function AssignDriverModal({ open, order, martId, onClose, onAssigned }) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Driver Assignment Inline Picker
+// Shows a dropdown + Assign button. Used in the grid row when status='packed'
+// and inside the detail modal.
+// ─────────────────────────────────────────────────────────────────────────────
+function DriverPicker({ orderId, martId, onAssigned }) {
     const dispatch = useDispatch()
-    const allDrivers = useSelector(selectAvailableDrivers)  // from driverSlice
+    const drivers = useSelector(selectAllDrivers)
+    const loading = useSelector(selectDriversLoading)
     const [driverId, setDriverId] = useState('')
-    const [loading, setLoading] = useState(false)
+    const [busy, setBusy] = useState(false)
 
-    // Fetch available drivers for this mart when modal opens
     useEffect(() => {
-        if (!open || !order || !martId) return
-        setDriverId('')
-        dispatch(fetchAvailableDrivers({ martId }))
-    }, [open, order?.id, martId, dispatch])
+        if (!drivers.length && !loading) {
+            dispatch(fetchAvailableDrivers({ martId }))
+        }
+    }, [martId, drivers.length, loading, dispatch])
 
-    const handleAssign = async () => {
+    const handleAssign = async (e) => {
+        e?.stopPropagation()
         if (!driverId) {
-            dispatch(showToast({ message: 'Please select a driver', type: 'error' }))
+            dispatch(showToast({ message: 'Pick a driver first', type: 'error' }))
             return
         }
-        setLoading(true)
-        try {
-            const res = await dispatch(assignDriverToOrder({ orderId: order.id, driverId }))
-            if (assignDriverToOrder.fulfilled.match(res)) {
-                dispatch(showToast({ message: `Driver assigned`, type: 'success' }))
-                onAssigned()
-                onClose()
-            } else {
-                dispatch(showToast({ message: res.payload || 'Failed to assign', type: 'error' }))
-            }
-        } finally {
-            setLoading(false)
+        setBusy(true)
+        const action = await dispatch(assignDriver({ orderId, driverId }))
+        setBusy(false)
+        if (assignDriver.fulfilled.match(action)) {
+            dispatch(showToast({ message: 'Driver assigned', type: 'success' }))
+            setDriverId('')
+            onAssigned?.()
+        } else {
+            dispatch(showToast({
+                message: action.payload || 'Assign failed',
+                type: 'error',
+            }))
         }
     }
 
-    if (!order) return null
-    const addr = order.delivery_address || {}
+    return (
+        <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+            <select
+                value={driverId}
+                onChange={e => setDriverId(e.target.value)}
+                disabled={loading || busy}
+                className="text-xs border border-gray-200 rounded px-2 py-1 bg-white outline-none focus:border-primary-400 max-w-[140px]"
+            >
+                <option value="">{loading ? 'Loading…' : 'Pick driver'}</option>
+                {drivers.map(d => (
+                    <option key={d.id} value={d.id} >
+                        {d.name}{d.vehicle_number ? ` · ${d.vehicle_number}` : ''}
+                    </option>
+                ))}
+            </select>
+            <Button
+                variant="primary"
+                size="sm"
+                loading={busy}
+                disabled={!driverId || busy}
+                onClick={handleAssign}
+            >
+                Assign
+            </Button>
+        </div>
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancel modal — reason required
+// ─────────────────────────────────────────────────────────────────────────────
+function CancelModal({ open, onClose, orderId }) {
+    const dispatch = useDispatch()
+    const [reason, setReason] = useState('')
+    const [busy, setBusy] = useState(false)
+
+    useEffect(() => { if (open) setReason('') }, [open])
+
+    const submit = async () => {
+        if (!reason.trim()) {
+            dispatch(showToast({ message: 'Reason is required', type: 'error' }))
+            return
+        }
+        setBusy(true)
+        const action = await dispatch(cancelOrder({ orderId, reason }))
+        setBusy(false)
+        if (cancelOrder.fulfilled.match(action)) {
+            dispatch(showToast({ message: 'Order cancelled', type: 'success' }))
+            onClose()
+        } else {
+            dispatch(showToast({ message: action.payload || 'Cancel failed', type: 'error' }))
+        }
+    }
 
     return (
         <Modal
-            title={`Assign Driver — Order #${order.id?.slice(-8)}`}
+            title="Cancel Order"
             open={open}
             onClose={onClose}
-            size="sm"
+            size="md"
             footer={
                 <>
-                    <Button variant="secondary" onClick={onClose}>Cancel</Button>
-                    <Button variant="primary" loading={loading} onClick={handleAssign}>Assign Driver</Button>
+                    <Button variant="secondary" onClick={onClose}>Keep Order</Button>
+                    <Button variant="danger" loading={busy} onClick={submit}>Cancel Order</Button>
                 </>
             }
         >
-            <div className="space-y-4">
-                {/* Delivery address */}
-                <div className="bg-blue-50 rounded-xl p-3 border border-blue-100">
-                    <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest mb-1.5">Delivery Address</p>
-                    <p className="text-xs font-bold text-gray-800">{addr.name || 'Customer'}</p>
-                    <p className="text-xs text-gray-600 mt-0.5">
-                        {addr.line1}{addr.city ? `, ${addr.city}` : ''}{addr.pincode ? ` — ${addr.pincode}` : ''}
-                    </p>
-                    {addr.phone && <p className="text-xs text-gray-500 mt-0.5">📞 {addr.phone}</p>}
-                </div>
-
-                {/* Driver dropdown */}
-                <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
-                        Available Drivers ({allDrivers.length})
-                    </label>
-
-                    {allDrivers.length === 0 ? (
-                        <div className="text-xs text-gray-400 py-4 text-center bg-gray-50 rounded-xl border border-gray-100">
-                            No available drivers right now
-                        </div>
-                    ) : (
-                        <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
-                            {allDrivers.map(d => (
-                                <button
-                                    key={d.id}
-                                    onClick={() => setDriverId(d.id)}
-                                    className={`w-full text-left px-3 py-2.5 rounded-xl border transition-all ${driverId === d.id
-                                        ? 'bg-primary-600 border-primary-600 text-white'
-                                        : 'bg-white border-gray-200 hover:border-primary-200 hover:bg-primary-50/50'
-                                        }`}
-                                >
-                                    <div className="flex items-center justify-between">
-                                        <div>
-                                            <p className={`text-xs font-bold ${driverId === d.id ? 'text-white' : 'text-gray-800'}`}>
-                                                {d.name}
-                                            </p>
-                                            <p className={`text-[10px] mt-0.5 ${driverId === d.id ? 'text-white/70' : 'text-gray-400'}`}>
-                                                {d.vehicleType} · {d.vehicleNumber}
-                                            </p>
-                                        </div>
-                                        <p className={`text-[10px] font-bold ${driverId === d.id ? 'text-white/80' : 'text-gray-400'}`}>
-                                            📞 {d.phone}
-                                        </p>
-                                    </div>
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
+            <div className="space-y-3">
+                <p className="text-sm text-gray-600">
+                    This will cancel the order and automatically return the stock to inventory.
+                    A return transaction will be logged for each item.
+                </p>
+                <Input
+                    label="Reason *"
+                    value={reason}
+                    onChange={e => setReason(e.target.value)}
+                    placeholder="Customer requested cancellation"
+                />
             </div>
         </Modal>
     )
 }
 
-// ── OrderDetailModal ──────────────────────────────────────────
-function OrderDetailModal({ selected, onClose, onStatus, onAssign }) {
-    if (!selected) return null
-    const flow = STATUS_FLOW[selected.status]
-    const addr = selected.delivery_address || {}
+// ─────────────────────────────────────────────────────────────────────────────
+// Order Detail Modal — shows items, allows packing, status advance, cancel
+// ─────────────────────────────────────────────────────────────────────────────
+function OrderDetailModal({ open, onClose, orderId, martId }) {
+    const dispatch = useDispatch()
+    const order = useSelector(selectOrderDetail)
+    const loading = useSelector(selectOrderDetailLoading)
+    const [cancelOpen, setCancelOpen] = useState(false)
+    const [busy, setBusy] = useState(false)
+
+    useEffect(() => {
+        if (open && orderId) dispatch(fetchOrderDetail(orderId))
+        return () => { if (!open) dispatch(clearOrderDetail()) }
+    }, [open, orderId, dispatch])
+
+    if (!open) return null
+
+    const advance = async (status) => {
+        setBusy(true)
+        const action = status === 'confirmed'
+            ? await dispatch(confirmOrder({ orderId }))
+            : await dispatch(updateOrderStatus({ orderId, status }))
+        setBusy(false)
+        if (!action.error) onClose()
+    }
+
+    const handlePack = async (itemId) => {
+        await dispatch(packOrderItem({ orderId, itemId }))
+    }
+
+    const status = order?.status
+    const next = NEXT_ACTION[status]
+    const showDriverPicker = status === 'packed'
+    const canCancel = order && !['delivered', 'cancelled', 'refunded'].includes(status)
 
     return (
-        <Modal
-            title={`Order #${selected.id?.slice(-8)}`}
-            open={!!selected}
-            onClose={onClose}
-            size="lg"
-            footer={
-                <div className="flex gap-2 justify-end">
-                    <Button variant="secondary" onClick={onClose}>Close</Button>
-                    {flow && (
-                        flow.special === 'assign'
-                            ? <Button variant="primary" onClick={() => { onClose(); onAssign(selected) }}>🚗 Assign Driver</Button>
-                            : <Button variant="primary" onClick={() => onStatus(selected.id, flow.next)}>{flow.label}</Button>
-                    )}
-                </div>
-            }
-        >
-            <div className="space-y-5">
-
-                {/* KPI row */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    {[
-                        ['Status', <Badge key="s" variant={STATUS_BADGE[selected.status] || 'gray'} size="sm">{selected.status.replace(/_/g, ' ').toUpperCase()}</Badge>],
-                        ['Total', <span key="t" className="font-bold text-gray-900">₹{selected.total}</span>],
-                        ['Payment', <Badge key="p" variant="gray" size="sm">{selected.payment_method?.toUpperCase()}</Badge>],
-                        ['Type', <Badge key="ty" variant={selected.order_type === 'pos' ? 'purple' : 'blue'} size="sm">{selected.order_type?.toUpperCase()}</Badge>],
-                    ].map(([label, value]) => (
-                        <div key={label} className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">{label}</p>
-                            <div className="text-sm font-medium text-gray-900">{value}</div>
+        <>
+            <Modal
+                title={`Order #${order?.order_number || orderId?.slice(-8)}`}
+                open={open}
+                onClose={onClose}
+                size="xl"
+                footer={
+                    <div className="flex items-center justify-between w-full">
+                        <Button variant="secondary" onClick={onClose}>Close</Button>
+                        <div className="flex items-center gap-2">
+                            {canCancel && (
+                                <Button variant="danger" onClick={() => setCancelOpen(true)}>
+                                    Cancel Order
+                                </Button>
+                            )}
+                            {showDriverPicker && (
+                                <DriverPicker
+                                    orderId={orderId}
+                                    martId={martId}
+                                    onAssigned={onClose}
+                                />
+                            )}
+                            {next && (
+                                <Button
+                                    variant={next.color}
+                                    loading={busy}
+                                    onClick={() => advance(next.next)}
+                                >
+                                    {next.label}
+                                </Button>
+                            )}
                         </div>
-                    ))}
-                </div>
-
-                {/* Driver info — shown when assigned */}
-                {selected.driver_id && selected.driver && (
-                    <div className="bg-orange-50 rounded-xl p-3 border border-orange-100 flex items-center justify-between">
-                        <div>
-                            <p className="text-[10px] font-bold text-orange-600 uppercase tracking-widest mb-1">Driver</p>
-                            <p className="text-xs font-bold text-gray-800">{selected.driver.name}</p>
-                            <p className="text-[10px] text-gray-500">{selected.driver.vehicle_type} · {selected.driver.vehicle_number}</p>
-                        </div>
-                        {['out_for_delivery', 'delivered'].includes(selected.status) && selected.driver.phone && (
-                            <a href={`tel:${selected.driver.phone}`}
-                                className="flex items-center gap-1.5 text-xs font-bold text-orange-700 bg-orange-100 px-3 py-2 rounded-lg hover:bg-orange-200 transition-colors">
-                                📞 {selected.driver.phone}
-                            </a>
-                        )}
                     </div>
-                )}
+                }
+            >
+                {loading || !order ? (
+                    <p className="text-sm text-gray-500 py-8 text-center">Loading…</p>
+                ) : (
+                    <div className="space-y-5">
+                        {/* Header strip */}
+                        <div className="flex items-center justify-between flex-wrap gap-3">
+                            <Badge variant={STATUS_BADGE_COLOR[status] || 'gray'}>
+                                {status?.toUpperCase()}
+                            </Badge>
+                            <div className="text-xs text-gray-500">
+                                Placed {fmtDateTime(order.created_at)}
+                                {order.confirmed_at && ` · Confirmed ${fmtDateTime(order.confirmed_at)}`}
+                                {order.delivered_at && ` · Delivered ${fmtDateTime(order.delivered_at)}`}
+                            </div>
+                        </div>
 
-                {/* Items */}
-                <div className="border border-gray-100 rounded-2xl overflow-hidden shadow-sm">
-                    <table className="w-full text-xs">
-                        <thead>
-                            <tr className="bg-gray-50/50 border-b border-gray-100">
-                                <th className="text-left py-3 px-4 text-[10px] font-bold text-gray-400 uppercase tracking-widest">Item</th>
-                                <th className="text-center py-3 px-2 text-[10px] font-bold text-gray-400 uppercase tracking-widest">Price</th>
-                                <th className="text-center py-3 px-2 text-[10px] font-bold text-gray-400 uppercase tracking-widest">Qty</th>
-                                <th className="text-right py-3 px-4 text-[10px] font-bold text-gray-400 uppercase tracking-widest">Total</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-50">
-                            {selected.items?.map((item, idx) => (
-                                <tr key={idx} className="hover:bg-gray-50/50 transition-colors">
-                                    <td className="py-3 px-4">
-                                        <p className="font-bold text-gray-800">{item.product_name}</p>
-                                        <p className="text-[10px] text-gray-400">{item.brand}{item.variant_id ? ` · ${item.variant_id}` : ''}</p>
-                                    </td>
-                                    <td className="py-3 px-2 text-center">
-                                        <p className="font-medium text-gray-900">₹{item.unit_price}</p>
-                                        {parseFloat(item.mrp) > parseFloat(item.unit_price) && (
-                                            <p className="text-[9px] text-gray-400 line-through">₹{item.mrp}</p>
-                                        )}
-                                    </td>
-                                    <td className="py-3 px-2 text-center font-bold text-gray-700">{item.quantity}</td>
-                                    <td className="py-3 px-4 text-right font-bold text-primary-600">₹{item.total_price}</td>
-                                </tr>
+                        {/* Money + meta grid */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                            {[
+                                ['Total', `₹${order.total}`],
+                                ['Subtotal', `₹${order.subtotal}`],
+                                ['Delivery Fee', `₹${order.delivery_fee || 0}`],
+                                ['Tax', `₹${order.tax || 0}`],
+                                ['Discount', `₹${order.discount || 0}`],
+                                ['Payment', order.payment_method?.toUpperCase()],
+                                ['Pay Status', order.payment_status],
+                                ['Type', order.order_type],
+                            ].map(([label, value]) => (
+                                <div key={label} className="bg-gray-50 rounded-lg p-3">
+                                    <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">{label}</p>
+                                    <p className="font-bold text-gray-900 text-sm mt-0.5">{value || '—'}</p>
+                                </div>
                             ))}
-                        </tbody>
-                    </table>
-                </div>
+                        </div>
 
-                {/* Price summary */}
-                <div className="flex justify-end">
-                    <div className="w-full md:w-64 space-y-2 p-4 bg-gray-50/50 rounded-2xl border border-gray-100">
-                        <div className="flex justify-between text-xs text-gray-500">
-                            <span>Subtotal</span><span className="font-medium">₹{selected.subtotal}</span>
-                        </div>
-                        <div className="flex justify-between text-xs text-gray-500">
-                            <span>Delivery Fee</span><span className="font-medium">₹{selected.delivery_fee}</span>
-                        </div>
-                        {parseFloat(selected.discount) > 0 && (
-                            <div className="flex justify-between text-xs text-red-500">
-                                <span>Discount</span><span className="font-medium">-₹{selected.discount}</span>
+                        {/* Delivery address */}
+                        {order.delivery_address && (
+                            <div className="bg-gray-50 rounded-lg p-3">
+                                <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold mb-1">
+                                    Delivery Address
+                                </p>
+                                <p className="font-medium text-gray-900 text-sm">{order.delivery_address.name}</p>
+                                <p className="text-xs text-gray-600">
+                                    {order.delivery_address.line1}
+                                    {order.delivery_address.line2 && `, ${order.delivery_address.line2}`}
+                                </p>
+                                <p className="text-xs text-gray-600">
+                                    {order.delivery_address.city} {order.delivery_address.pincode}
+                                </p>
+                                <p className="text-xs text-gray-500 mt-0.5">📞 {order.delivery_address.phone}</p>
                             </div>
                         )}
-                        <div className="pt-2 border-t border-gray-200 flex justify-between text-sm">
-                            <span className="font-bold text-gray-900">Grand Total</span>
-                            <span className="font-black text-primary-600">₹{selected.total}</span>
-                        </div>
-                    </div>
-                </div>
 
-                {/* Delivery address */}
-                {selected.delivery_address && (
-                    <div className="bg-primary-50/30 rounded-2xl p-4 border border-primary-100">
-                        <h4 className="text-[10px] font-bold text-primary-600 uppercase tracking-widest mb-2">Delivery Details</h4>
-                        <p className="text-sm font-bold text-gray-900">{addr.name}</p>
-                        <p className="text-xs text-gray-600 mt-0.5">{addr.line1}{addr.city ? `, ${addr.city}` : ''}{addr.pincode ? ` — ${addr.pincode}` : ''}</p>
-                        {addr.phone && <p className="text-xs text-gray-500 mt-0.5">📞 {addr.phone}</p>}
-                        {selected.delivery_notes && (
-                            <div className="mt-2 flex items-start gap-2 bg-white/60 p-2 rounded-lg border border-primary-100">
-                                <span className="text-[10px] font-bold text-primary-600 shrink-0">NOTE:</span>
-                                <span className="text-[11px] text-gray-600 italic">{selected.delivery_notes}</span>
+                        {/* Driver info if assigned */}
+                        {order.driver_name && (
+                            <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+                                <p className="text-[10px] uppercase tracking-widest text-blue-600 font-bold mb-1">
+                                    Assigned Driver
+                                </p>
+                                <p className="font-bold text-gray-900 text-sm">{order.driver_name}</p>
+                                <p className="text-xs text-gray-600">📞 {order.driver_phone}</p>
+                            </div>
+                        )}
+
+                        {/* Items table */}
+                        {Array.isArray(order.items) && order.items.length > 0 && (
+                            <div>
+                                <h4 className="text-[10px] uppercase tracking-widest text-gray-500 font-bold mb-2">
+                                    Items ({order.items.length})
+                                </h4>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                        <thead>
+                                            <tr className="border-b border-gray-200">
+                                                <th className="text-left pb-2 pr-3 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Product</th>
+                                                <th className="text-right pb-2 pr-3 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Qty</th>
+                                                <th className="text-right pb-2 pr-3 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Price</th>
+                                                <th className="text-right pb-2 pr-3 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Total</th>
+                                                <th className="text-center pb-2 font-bold text-gray-500 uppercase tracking-widest text-[10px]">Pack</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-100">
+                                            {order.items.map(it => (
+                                                <tr key={it.id}>
+                                                    <td className="py-2 pr-3">
+                                                        <p className="font-medium text-gray-900">{it.product_name}</p>
+                                                        {it.brand && <p className="text-[10px] text-gray-500">{it.brand} · {it.unit}</p>}
+                                                    </td>
+                                                    <td className="py-2 pr-3 text-right tabular-nums">{it.quantity}</td>
+                                                    <td className="py-2 pr-3 text-right tabular-nums">₹{it.unit_price}</td>
+                                                    <td className="py-2 pr-3 text-right tabular-nums font-bold">₹{it.total_price}</td>
+                                                    <td className="py-2 text-center">
+                                                        {it.is_packed ? (
+                                                            <Badge variant="green" size="xs">PACKED</Badge>
+                                                        ) : (status === 'preparing' || status === 'confirmed') ? (
+                                                            <button
+                                                                onClick={() => handlePack(it.id)}
+                                                                className="text-[10px] text-primary-600 font-bold hover:bg-primary-50 px-2 py-1 rounded"
+                                                            >
+                                                                MARK PACKED
+                                                            </button>
+                                                        ) : (
+                                                            <span className="text-gray-300 text-[10px]">—</span>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Cancellation info */}
+                        {order.cancelled_at && (
+                            <div className="bg-red-50 border border-red-100 rounded-lg p-3">
+                                <p className="text-[10px] uppercase tracking-widest text-red-600 font-bold mb-1">
+                                    Cancelled
+                                </p>
+                                <p className="text-xs text-gray-700">
+                                    {fmtDateTime(order.cancelled_at)} by {order.cancelled_by}
+                                </p>
+                                {order.cancelled_reason && (
+                                    <p className="text-xs text-gray-600 mt-1">"{order.cancelled_reason}"</p>
+                                )}
                             </div>
                         )}
                     </div>
                 )}
+            </Modal>
 
-                {/* Timestamps */}
-                <div className="flex gap-4 text-[10px] text-gray-400">
-                    <span>Placed: <span className="font-medium text-gray-600">{fmtDate(selected.created_at)}</span></span>
-                    {selected.updated_at && selected.updated_at !== selected.created_at && (
-                        <span>Updated: <span className="font-medium text-gray-600">{fmtDate(selected.updated_at)}</span></span>
-                    )}
-                </div>
-            </div>
-        </Modal>
+            <CancelModal
+                open={cancelOpen}
+                onClose={() => setCancelOpen(false)}
+                orderId={orderId}
+            />
+        </>
     )
 }
 
-// ── Main Page ─────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Page
+// ─────────────────────────────────────────────────────────────────────────────
 export default function Orders() {
     const dispatch = useDispatch()
     const orders = useSelector(selectAllOrders)
     const loading = useSelector(selectOrderLoading)
-    const pagination = useSelector(selectOrderPagination)
-    const { activeMartId: martId, selectorProps } = useMart()
+    const stats = useSelector(selectOrderStats)
+    const { martId } = useAuth()
 
-    const [committedFilters, setCommittedFilters] = useState({
-        status: '', search: '', orderType: '', startDate: '', endDate: '', page: 1
-    })
-    const [selected, setSelected] = useState(null)
-    const [assignOrder, setAssignOrder] = useState(null)
+    const [statusFilter, setStatusFilter] = useState('')
+    const [search, setSearch] = useState('')
+    const [selectedId, setSelectedId] = useState(null)
+    const [busyOrderId, setBusyOrderId] = useState(null)
 
-    useEffect(() => { dispatch(fetchMarts()) }, [dispatch])
-
-    useEffect(() => {
-        if (martId) dispatch(fetchOrders({ martId, ...committedFilters }))
-    }, [martId, committedFilters, dispatch])
-
-    const refresh = useCallback(() => {
-        if (martId) dispatch(fetchOrders({ martId, ...committedFilters }))
-    }, [martId, committedFilters, dispatch])
-
-    const handleSearch = (f) => setCommittedFilters({ ...f, page: 1 })
-    const handleReset = () => setCommittedFilters({ status: '', search: '', orderType: '', startDate: '', endDate: '', page: 1 })
-    const handlePageChange = (p) => setCommittedFilters(f => ({ ...f, page: p }))
-
-    const handleStatus = async (orderId, newStatus) => {
-        const res = await dispatch(updateOrderStatus({ orderId, status: newStatus }))
-        if (!res.error) {
-            dispatch(showToast({ message: `Status updated to ${newStatus.replace(/_/g, ' ')}`, type: 'success' }))
-            setSelected(null)
-            refresh()
-        } else {
-            dispatch(showToast({ message: res.payload || 'Failed to update status', type: 'error' }))
+    const load = () => {
+        if (martId) {
+            dispatch(fetchOrders({ martId, status: statusFilter }))
+            dispatch(fetchOrderStats({ martId, range: '1 day' }))
         }
     }
 
-    const handleView = async (order) => {
-        setSelected(order)
-        const action = await dispatch(fetchOrderById(order.id))
-        if (fetchOrderById.fulfilled.match(action)) setSelected(action.payload)
+    useEffect(() => { load() }, [martId, statusFilter])
+
+    // Auto-refresh every 30s
+    // useEffect(() => {
+    //     const t = setInterval(load, 30000)
+    //     return () => clearInterval(t)
+    // }, [martId, statusFilter])
+
+    // Client-side search filter (over already-fetched list)
+    const filtered = useMemo(() => {
+        if (!search.trim()) return orders
+        const q = search.toLowerCase()
+        return orders.filter(o =>
+            o.id?.toLowerCase().includes(q) ||
+            o.order_number?.toLowerCase().includes(q) ||
+            o.customer_name?.toLowerCase().includes(q) ||
+            o.customer_phone?.toLowerCase().includes(q) ||
+            o.driver_name?.toLowerCase().includes(q)
+        )
+    }, [orders, search])
+
+    // Counts per status for tab badges
+    const counts = useMemo(() => {
+        const c = {}
+        for (const o of orders) c[o.status] = (c[o.status] || 0) + 1
+        c[''] = orders.length
+        return c
+    }, [orders])
+
+    // ── Inline action handlers ──────────────────────────────────────────────
+    const handleAdvance = async (e, order) => {
+        e.stopPropagation()
+        const next = NEXT_ACTION[order.status]
+        if (!next) return
+
+        setBusyOrderId(order.id)
+        if (next.next === 'confirmed') {
+            await dispatch(confirmOrder({ orderId: order.id }))
+        } else {
+            await dispatch(updateOrderStatus({ orderId: order.id, status: next.next }))
+        }
+        setBusyOrderId(null)
     }
 
+    // ── Grid columns ────────────────────────────────────────────────────────
     const columns = [
         {
-            key: 'id', label: 'Order ID',
+            key: 'id',
+            label: 'Order',
             render: r => (
-                <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border border-gray-200">
-                    #{r.id?.slice(-8)}
-                </span>
-            )
+                <div className="py-1">
+                    <p className="font-mono text-[11px] font-bold text-gray-900">
+                        #{r.order_number || r.id?.slice(-8)}
+                    </p>
+                    <p className="text-[10px] text-gray-400">{fmtDateTime(r.created_at)}</p>
+                </div>
+            ),
         },
         {
-            key: 'created_at', label: 'Placed',
-            render: r => <span className="text-xs text-gray-500">{fmtDate(r.created_at)}</span>
-        },
-        {
-            key: 'total', label: 'Total',
-            render: r => <span className="font-bold text-gray-900">₹{r.total}</span>
-        },
-        {
-            key: 'payment_method', label: 'Payment',
-            render: r => <Badge variant="gray" size="xs">{r.payment_method?.toUpperCase()}</Badge>
-        },
-        {
-            key: 'order_type', label: 'Type',
-            render: r => <Badge variant={r.order_type === 'pos' ? 'purple' : 'blue'} size="xs">{r.order_type?.toUpperCase()}</Badge>
-        },
-        {
-            key: 'status', label: 'Status',
+            key: 'customer',
+            label: 'Customer',
             render: r => (
-                <Badge variant={STATUS_BADGE[r.status] || 'gray'} size="xs">
-                    {r.status?.replace(/_/g, ' ').toUpperCase()}
+                <div className="py-1">
+                    <p className="text-xs font-medium text-gray-900">{r.customer_name || '—'}</p>
+                    <p className="text-[10px] text-gray-500">{r.customer_phone || '—'}</p>
+                </div>
+            ),
+        },
+        {
+            key: 'total',
+            label: 'Total',
+            render: r => (
+                <div className="text-xs">
+                    <p className="font-bold text-gray-900 tabular-nums">₹{r.total}</p>
+                    <p className="text-[10px] text-gray-400 uppercase">{r.payment_method}</p>
+                </div>
+            ),
+        },
+        {
+            key: 'type',
+            label: 'Type',
+            render: r => (
+                <Badge variant={r.order_type === 'pos' ? 'blue' : 'gray'} size="xs">
+                    {r.order_type?.toUpperCase()}
                 </Badge>
-            )
+            ),
         },
         {
-            key: 'actions', label: '',
-            render: r => {
-                const flow = STATUS_FLOW[r.status]
-                return (
-                    <div className="flex justify-end gap-1">
-                        <button
-                            onClick={() => handleView(r)}
-                            className="text-[10px] text-gray-600 font-black hover:bg-gray-100 px-2 py-1 rounded transition-colors uppercase tracking-tighter">
-                            View
-                        </button>
-                        {flow && (
-                            flow.special === 'assign'
-                                ? <button
-                                    onClick={e => { e.stopPropagation(); setAssignOrder(r) }}
-                                    className="text-[10px] text-blue-700 font-black hover:bg-blue-50 px-2 py-1 rounded transition-colors uppercase tracking-tighter">
-                                    🚗 Assign
-                                </button>
-                                : <button
-                                    onClick={e => { e.stopPropagation(); handleStatus(r.id, flow.next) }}
-                                    className="text-[10px] text-green-700 font-black hover:bg-green-50 px-2 py-1 rounded transition-colors uppercase tracking-tighter">
-                                    {flow.label}
-                                </button>
-                        )}
+            key: 'driver',
+            label: 'Driver',
+            render: r => r.driver_name
+                ? (
+                    <div className="text-[10px]">
+                        <p className="font-medium text-gray-700">{r.driver_name}</p>
+                        <p className="text-gray-400">{r.driver_phone}</p>
                     </div>
                 )
-            }
+                : <span className="text-gray-300 text-[10px]">—</span>,
+        },
+        {
+            key: 'eta',
+            label: 'ETA',
+            render: r => r.eta_minutes
+                ? <span className="text-xs text-gray-700">{r.eta_minutes}m</span>
+                : <span className="text-gray-300 text-[10px]">—</span>,
+        },
+        {
+            key: 'status',
+            label: 'Status',
+            render: r => (
+                <Badge variant={STATUS_BADGE_COLOR[r.status] || 'gray'} size="xs">
+                    {r.status?.replace(/_/g, ' ')?.toUpperCase()}
+                </Badge>
+            ),
+        },
+        {
+            key: 'actions',
+            label: '',
+            render: r => {
+                const next = NEXT_ACTION[r.status]
+                const showDriverPicker = r.status === 'packed'
+                const isBusy = busyOrderId === r.id
+
+                return (
+                    <div className="flex items-center justify-end gap-1.5 pr-2" onClick={e => e.stopPropagation()}>
+                        {showDriverPicker ? (
+                            <DriverPicker
+                                orderId={r.id}
+                                martId={martId}
+                                onAssigned={load}
+                            />
+                        ) : next ? (
+                            <Button
+                                variant={next.color}
+                                size="sm"
+                                loading={isBusy}
+                                onClick={(e) => handleAdvance(e, r)}
+                            >
+                                {next.label}
+                            </Button>
+                        ) : null}
+                        <button
+                            onClick={(e) => { e.stopPropagation(); setSelectedId(r.id) }}
+                            className="text-[10px] text-gray-600 font-black hover:bg-gray-100 px-2 py-1 rounded transition-colors uppercase tracking-tighter"
+                        >
+                            View
+                        </button>
+                    </div>
+                )
+            },
         },
     ]
 
@@ -520,58 +591,73 @@ export default function Orders() {
         <div className="p-4 sm:p-6 space-y-4">
             <PageHeader
                 title="Orders"
-                subtitle="View and manage all orders for your mart"
-                action={
-                    <div className="flex items-center gap-4">
-                        <MartSelector {...selectorProps} />
-                        <Button variant="secondary" onClick={refresh}>↻ Refresh</Button>
-                    </div>
-                }
+                subtitle="Manage incoming orders and assign drivers"
+                action={<Button variant="secondary" onClick={load}>↻ Refresh</Button>}
             />
 
-            {martId && (
-                <FilterBar
-                    committedFilters={committedFilters}
-                    onSearch={handleSearch}
-                    onReset={handleReset}
-                    loading={loading}
+            {/* Stats cards */}
+            {stats && (
+                <div className="flex gap-3 flex-wrap">
+                    {[
+                        { label: 'Total Today', value: stats.total_orders || 0, color: 'text-gray-700' },
+                        { label: 'Pending', value: stats.pending_orders || 0, color: 'text-yellow-600' },
+                        { label: 'Delivered', value: stats.delivered_orders || 0, color: 'text-green-600' },
+                        { label: 'Cancelled', value: stats.cancelled_orders || 0, color: 'text-red-600' },
+                        { label: 'Revenue', value: `₹${Number(stats.total_revenue || 0).toFixed(0)}`, color: 'text-primary-600' },
+                        { label: 'Avg Order', value: `₹${Number(stats.avg_order_value || 0).toFixed(0)}`, color: 'text-gray-700' },
+                    ].map(s => (
+                        <div key={s.label} className="bg-white border border-gray-100 rounded-lg px-4 py-2 shadow-sm">
+                            <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
+                            <p className="text-xs text-gray-400">{s.label}</p>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {/* Status tabs */}
+            <div className="flex gap-1.5 flex-wrap">
+                {STATUS_TABS.map(s => {
+                    const count = counts[s] || 0
+                    const isActive = statusFilter === s
+                    return (
+                        <button
+                            key={s || 'all'}
+                            onClick={() => setStatusFilter(s)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 ${isActive
+                                ? 'bg-primary-500 text-white'
+                                : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
+                                }`}
+                        >
+                            {(s || 'all').replace(/_/g, ' ')}
+                            {count > 0 && (
+                                <span className={`text-[10px] font-bold px-1.5 rounded-full ${isActive ? 'bg-white/20' : 'bg-gray-100'
+                                    }`}>
+                                    {count}
+                                </span>
+                            )}
+                        </button>
+                    )
+                })}
+            </div>
+
+            <Grid
+                columns={columns}
+                data={filtered}
+                loading={loading}
+                emptyText="No orders match this filter."
+                onSearchChange={setSearch}
+                searchPlaceholder="Search by order #, customer, phone, driver..."
+                pageSize={15}
+            />
+
+            {selectedId && (
+                <OrderDetailModal
+                    open={!!selectedId}
+                    onClose={() => setSelectedId(null)}
+                    orderId={selectedId}
+                    martId={martId}
                 />
             )}
-
-            {!martId ? (
-                <div className="bg-white rounded-xl border border-gray-100 p-10 text-center text-gray-500 font-medium shadow-sm">
-                    Please select a mart from the dropdown to view its orders.
-                </div>
-            ) : (
-                <>
-                    <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
-                        <Table
-                            columns={columns}
-                            data={orders}
-                            loading={loading}
-                            emptyText="No orders found for the selected filters"
-                        />
-                    </div>
-                    <PaginationBar pagination={pagination} onPageChange={handlePageChange} />
-                </>
-            )}
-
-            {/* Order detail modal */}
-            <OrderDetailModal
-                selected={selected}
-                onClose={() => setSelected(null)}
-                onStatus={handleStatus}
-                onAssign={(order) => setAssignOrder(order)}
-            />
-
-            {/* Assign driver modal */}
-            <AssignDriverModal
-                open={!!assignOrder}
-                order={assignOrder}
-                martId={martId}
-                onClose={() => setAssignOrder(null)}
-                onAssigned={refresh}
-            />
         </div>
     )
 }

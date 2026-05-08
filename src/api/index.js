@@ -36,6 +36,7 @@ const request = async (method, path, body = null) => {
     if (res.status === 401) {
         // We commented out the redirect, so the app won't refresh anymore!
         // But we still clear the storage because the token is invalid.
+        localStorage.clear()
         console.error("Session expired or Token missing");
     }
 
