@@ -52,7 +52,7 @@ export const toggleDriverStatus = createAsyncThunk(
 export const assignDriverToOrder = createAsyncThunk(
     'drivers/assign',
     async ({ orderId, driverId }, { rejectWithValue }) => {
-        const res = await api.post('/orders/assign', { orderId, driverId })  // ← fixed URL
+        const res = await api.patch(`/orders/${orderId}/assign-driver`, { driverId })  // ← fixed URL
         if (!res.success) return rejectWithValue(res.message)
         return res.data
     }
@@ -135,7 +135,7 @@ export const selectAllDrivers = (state) => state.drivers.list || [];
 export const selectDriversLoading = (state) => state.drivers.loading;
 export const selectDriversError = (state) => state.drivers.error;
 export const selectAvailableDrivers = (state) =>
-    state.drivers.list.filter(d => d.status === 'available' && d.is_active) || [];
+    state.drivers.list.filter(d => d.status === 'available' && (d.is_active === true || d.isActive === true)) || [];
 export const selectAvailableDriversLoading = (state) => state.drivers.availableLoading;
 
 export const { clearDriverError, updateDriverLocation } = driverSlice.actions
