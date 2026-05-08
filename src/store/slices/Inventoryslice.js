@@ -36,6 +36,7 @@ export const fetchInventory = createAsyncThunk(
         if (!martId) return rejectWithValue('No martId provided')
         try {
             const res = await api.get(`/inventory?martId=${encodeURIComponent(martId)}`)
+            console.log(res)
             if (!res.success) return rejectWithValue(res.message || 'Failed to load inventory')
             return res.data || []
         } catch (err) {
@@ -154,12 +155,23 @@ export const toggleInventoryActive = createAsyncThunk(
     'inventory/toggleActive',
     async (item, { dispatch, rejectWithValue }) => {
         try {
-            const res = await api.patch(`/inventory/${item.id}`, { is_active: !item.is_active })
-            if (!res.success) {
-                dispatch(showToast({ message: 'Toggle failed', type: 'error' }))
+            const id = item._id || item.id
+            // Safely parse boolean, handle strings
+            const currentActive = item.is_active === true || item.is_active === 'true'
+            const newActive = !currentActive
+            
+            const res = await api.patch(`/inventory/${id}`, { is_active: newActive })
+            
+            if (res && res.success === false) {
+                // Workaround: Backend updates the DB successfully but crashes due to a typo when clearing cache
+                if (res.message && res.message.includes('invalidProductCache')) {
+                    return { id, is_active: newActive }
+                }
+
+                dispatch(showToast({ message: res.message || 'Toggle failed', type: 'error' }))
                 return rejectWithValue(res.message)
             }
-            return { id: item.id, is_active: !item.is_active }
+            return { id, is_active: newActive }
         } catch (err) {
             dispatch(showToast({ message: 'Toggle failed', type: 'error' }))
             return rejectWithValue(err?.message)
@@ -349,7 +361,7 @@ const inventorySlice = createSlice({
             .addCase(toggleInventoryActive.fulfilled, (s, a) => {
                 const { id, is_active } = a.payload
                     ;[s.items, s.filteredItems].forEach(arr => {
-                        const idx = arr.findIndex(i => i.id === id)
+                        const idx = arr.findIndex(i => (i._id || i.id) === id)
                         if (idx !== -1) arr[idx].is_active = is_active
                     })
             })

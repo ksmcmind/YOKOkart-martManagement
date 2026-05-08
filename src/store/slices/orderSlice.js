@@ -203,10 +203,11 @@ const orderSlice = createSlice({
 
         // ── Mutations: keep list AND detail in sync ───────────────
         const syncOrder = (s, payload) => {
-            if (!payload?.id) return
-            const idx = s.list.findIndex(o => o.id === payload.id)
+            const id = payload?.id || payload?.orderId;
+            if (!id) return
+            const idx = s.list.findIndex(o => o.id === id)
             if (idx !== -1) s.list[idx] = { ...s.list[idx], ...payload }
-            if (s.detail?.id === payload.id) {
+            if (s.detail?.id === id) {
                 s.detail = { ...s.detail, ...payload }
             }
         }
@@ -214,7 +215,7 @@ const orderSlice = createSlice({
         builder
             .addCase(updateOrderStatus.fulfilled, (s, a) => syncOrder(s, a.payload))
             .addCase(confirmOrder.fulfilled, (s, a) => syncOrder(s, a.payload))
-            .addCase(assignDriver.fulfilled, (s, a) => syncOrder(s, a.payload))
+            .addCase(assignDriver.fulfilled, (s, a) => syncOrder(s, { ...a.payload, status: 'assigned' }))
             .addCase(cancelOrder.fulfilled, (s, a) => syncOrder(s, a.payload))
 
         // ── packOrderItem ─────────────────────────────────────────
