@@ -7,6 +7,7 @@ export const fetchMarts = createAsyncThunk(
   'mart/fetchAll',
   async (_, { rejectWithValue }) => {
     const res = await api.get('/marts')
+    console.log(res)
     if (!res.success) return rejectWithValue(res.message)
     return res.data
   },
@@ -86,7 +87,7 @@ const martSlice = createSlice({
       })
       .addCase(fetchMarts.fulfilled, (state, action) => {
         state.loading = false
-        state.list = Array.isArray(action.payload) ? action.payload : []
+        state.list = Array.isArray(action.payload.data) ? action.payload.data : []
       })
       .addCase(fetchMarts.rejected, (state, action) => {
         state.loading = false; state.error = action.payload

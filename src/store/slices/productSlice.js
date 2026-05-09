@@ -1,4 +1,12 @@
 // src/store/slices/productSlice.js
+//
+// Products are GLOBAL catalog items (no mart_id). Only super admin creates/edits them.
+// Mart admins don't touch this slice — they work with inventorySlice instead.
+//
+// Register in your store:
+//   import productReducer from './slices/productSlice'
+//   reducer: { product: productReducer, ... }
+
 import { createSlice, createAsyncThunk, createSelector } from '@reduxjs/toolkit'
 import api from '../../api/index'
 import { showToast } from './uiSlice'
@@ -7,21 +15,14 @@ import { showToast } from './uiSlice'
 
 export const fetchProducts = createAsyncThunk(
   'product/fetchAll',
-  async ({
-    categorySlug = '',
-    subcategorySlug = '',
-    search = '',
-    brand = '',
-    isActive = '',
-    isVeg = '',
-    page = 1,
-    limit = 50,
-  } = {}, { rejectWithValue }) => {
+  async ({ martId = null, categorySlug = null, subcategorySlug = null, search = '', code = '', brand = '', isActive = '', isVeg = '', page = 1, limit = 50 } = {}, { rejectWithValue }) => {
     try {
       const qs = new URLSearchParams()
+      if (martId) qs.set('martId', martId)
       if (categorySlug) qs.set('categorySlug', categorySlug)
       if (subcategorySlug) qs.set('subcategorySlug', subcategorySlug)
       if (search) qs.set('search', search)
+      if (code) qs.set('code', code)
       if (brand) qs.set('brand', brand)
       if (isActive !== '') qs.set('isActive', isActive)
       if (isVeg !== '') qs.set('isVeg', isVeg)
@@ -111,7 +112,7 @@ const initialState = {
   error: null,
   saving: false,
   bulkUploading: false,
-  bulkStatus: null,
+  bulkStatus: null, // { total, done, success, failed }
 }
 
 const productSlice = createSlice({
@@ -121,25 +122,21 @@ const productSlice = createSlice({
     clearProductError: (state) => { state.error = null },
     setBulkStatus: (state, action) => { state.bulkStatus = action.payload },
     clearBulkStatus: (state) => { state.bulkStatus = null },
-    // Called on unmount so stale results don't show on next visit
     clearProducts: (state) => { state.list = []; state.pagination = null },
   },
   extraReducers: (builder) => {
     builder
-      // fetchProducts
       .addCase(fetchProducts.pending, (state) => { state.loading = true; state.error = null })
       .addCase(fetchProducts.fulfilled, (state, action) => {
         state.loading = false
-        // Backend may return { products, pagination } or a plain array
-        state.list = action.payload?.products ?? action.payload ?? []
-        state.pagination = action.payload?.pagination ?? null
+        state.list = action.payload?.products || action.payload || []
+        state.pagination = action.payload?.pagination || null
       })
       .addCase(fetchProducts.rejected, (state, action) => {
         state.loading = false
         state.error = action.payload
       })
 
-      // createProduct
       .addCase(createProduct.pending, (state) => { state.saving = true })
       .addCase(createProduct.fulfilled, (state, action) => {
         state.saving = false
@@ -147,19 +144,16 @@ const productSlice = createSlice({
       })
       .addCase(createProduct.rejected, (state) => { state.saving = false })
 
-      // updateProduct
       .addCase(updateProduct.fulfilled, (state, action) => {
         const p = action.payload
         const idx = state.list.findIndex(x => (x._id || x.id) === (p._id || p.id))
         if (idx !== -1) state.list[idx] = p
       })
 
-      // deleteProduct
       .addCase(deleteProduct.fulfilled, (state, action) => {
         state.list = state.list.filter(p => (p._id || p.id) !== action.payload)
       })
 
-      // bulkUploadProducts
       .addCase(bulkUploadProducts.pending, (state) => { state.bulkUploading = true })
       .addCase(bulkUploadProducts.fulfilled, (state) => { state.bulkUploading = false })
       .addCase(bulkUploadProducts.rejected, (state) => { state.bulkUploading = false })
@@ -187,7 +181,7 @@ export const selectBulkStatus = (state) => selectProductState(state).bulkStatus
 export const selectBulkUploading = (state) => selectProductState(state).bulkUploading
 export const selectPagination = (state) => selectProductState(state).pagination
 
-// Memoized client-side filter (use only if you want to filter already-loaded list)
+// Memoized filtered view
 export const selectFilteredProducts = createSelector(
   [selectAllProducts, (_state, search) => search],
   (products, search) => {
@@ -196,7 +190,7 @@ export const selectFilteredProducts = createSelector(
     return products.filter(p =>
       p.name?.toLowerCase().includes(q) ||
       p.brand?.toLowerCase().includes(q) ||
-      p.product_id?.toLowerCase().includes(q) ||
+      p.barcode?.toLowerCase().includes(q) ||
       p.category_slug?.toLowerCase().includes(q)
     )
   }

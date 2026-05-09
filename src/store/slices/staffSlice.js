@@ -5,7 +5,7 @@ import api from '../../api/index'
 export const fetchStaff = createAsyncThunk(
     'staff/fetchAll',
     async (martId, { rejectWithValue }) => {
-        const url = martId ? `/staff?martId=${martId}` : '/staff'
+        const url = martId ? `/staff?martId=${martId}` : `/staff`
         const res = await api.get(url)
         if (!res.success) return rejectWithValue(res.message)
         return res.data

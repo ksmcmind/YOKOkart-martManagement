@@ -42,12 +42,32 @@ export const deleteCategory = createAsyncThunk(
 // ── Subcategories ─────────────────────────────────────────────
 export const bulkUploadCategories = createAsyncThunk(
     'categories/bulkUpload',
-    async (rows, { rejectWithValue }) => {
-        const res = await api.post('/categories/bulk', { rows })
-        if (!res.success) return rejectWithValue(res.message)
-        return res.data
+    async (arg, { dispatch, rejectWithValue }) => {
+        const { file, staffId } = arg; // Ensure arg is an object { file, staffId }
+        if (!file) return rejectWithValue('No file provided');
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            if (staffId) formData.append('staffId', staffId);
+
+            // CHANGE: Removed '/upload' from the path and kept it consistent with category.routes.js
+            const res = await api.post('/categories/bulk', formData);
+
+            if (!res.success) {
+                dispatch(showToast({ message: res.message || 'Bulk upload failed', type: 'error' }));
+                return rejectWithValue(res.message);
+            }
+
+            dispatch(showToast({ message: 'Bulk upload queued successfully', type: 'success' }));
+            return res.data;
+        } catch (error) {
+            const errorMsg = error.response?.data?.message || error.message || 'Bulk upload failed';
+            dispatch(showToast({ message: errorMsg, type: 'error' }));
+            return rejectWithValue(errorMsg);
+        }
     }
-)
+);
 
 export const addSubcategory = createAsyncThunk(
     'categories/addSub',

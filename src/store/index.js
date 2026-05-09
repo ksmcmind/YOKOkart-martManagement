@@ -8,6 +8,8 @@ import categoryReducer from './slices/categorySlice'
 import productReducer from './slices/productSlice'
 import orderReducer from './slices/orderSlice'
 import inventoryReducer from './slices/inventorySlice'
+import driverReducer from './slices/driverSlice'
+
 const store = configureStore({
     reducer: {
         auth: authReducer,
@@ -18,6 +20,7 @@ const store = configureStore({
         product: productReducer,
         order: orderReducer,
         inventory: inventoryReducer,
+        drivers: driverReducer,
     },
 })
 

@@ -37,7 +37,12 @@ export const fetchInventory = createAsyncThunk(
         try {
             const res = await api.get(`/inventory?martId=${encodeURIComponent(martId)}`)
             if (!res.success) return rejectWithValue(res.message || 'Failed to load inventory')
-            return res.data || []
+            const rawData = res.data || (Array.isArray(res) ? res : [])
+            return rawData.map(item => ({
+                ...item,
+                id: item.id || item._id,
+                stock_qty: item.stock_qty ?? item.ck_qty ?? 0
+            }))
         } catch (err) {
             return rejectWithValue(err?.message || 'Network error')
         }
@@ -58,8 +63,14 @@ export const fetchInventoryFiltered = createAsyncThunk(
             // ← FIXED: /inventory/filters not /inventory
             const res = await api.get(`/inventory/filters?${params.toString()}`)
             if (!res.success) return rejectWithValue(res.message || 'Failed to load')
+            const rawData = res.data || (Array.isArray(res) ? res : [])
+            const items = rawData.map(item => ({
+                ...item,
+                id: item.id || item._id,
+                stock_qty: item.stock_qty ?? item.ck_qty ?? 0
+            }))
             return {
-                data: res.data || [],
+                data: items,
                 pagination: res.pagination || null,
             }
         } catch (err) {
