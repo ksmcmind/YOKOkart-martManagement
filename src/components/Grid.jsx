@@ -23,6 +23,7 @@ export default function Grid({
   showSearch = true,
   pagination = true,
   renderExpanded,
+  rowClassName,
 }) {
   const [internalSearch, setInternalSearch] = useState('')
   const [page, setPage] = useState(1)
@@ -87,6 +88,7 @@ export default function Grid({
           loading={loading}
           emptyText={emptyText}
           renderExpanded={renderExpanded}
+          rowClassName={rowClassName}
         />
       </div>
 

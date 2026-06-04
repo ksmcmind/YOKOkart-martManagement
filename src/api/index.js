@@ -2,7 +2,7 @@
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api'
 
 // Ensure this key matches exactly what you see in your Browser's Application tab
-export const getToken = () => localStorage.getItem('ksmcm_token') || ''
+export const getToken = () => localStorage.getItem('ksmcm_mart_token') || ''
 
 const request = async (method, path, body = null) => {
     const isFormData = body instanceof FormData
@@ -34,7 +34,8 @@ const request = async (method, path, body = null) => {
     if (res.status === 401) {
         // We commented out the redirect, so the app won't refresh anymore!
         // But we still clear the storage because the token is invalid.
-        localStorage.clear()
+        localStorage.removeItem('ksmcm_mart_user')
+        localStorage.removeItem('ksmcm_mart_token')
         console.error("Session expired or Token missing");
     }
 

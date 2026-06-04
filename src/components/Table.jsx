@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 
-export default function Table({ columns, data, loading, emptyText = 'No data found', renderExpanded }) {
+export default function Table({ columns, data, loading, emptyText = 'No data found', renderExpanded, rowClassName }) {
   const [expandedRows, setExpandedRows] = useState(new Set())
 
   const toggleRow = (id) => {
@@ -45,9 +45,10 @@ export default function Table({ columns, data, loading, emptyText = 'No data fou
           {data.map((row, i) => {
             const id = row.id || row._id || i
             const isExpanded = expandedRows.has(id)
+            const extraClass = typeof rowClassName === 'function' ? rowClassName(row) : (rowClassName || '')
             return (
               <React.Fragment key={id}>
-                <tr className={renderExpanded ? 'cursor-pointer hover:bg-gray-50' : ''} onClick={() => renderExpanded && toggleRow(id)}>
+                <tr className={`${renderExpanded ? 'cursor-pointer hover:bg-gray-50' : ''} ${extraClass}`.trim()} onClick={() => renderExpanded && toggleRow(id)}>
                   {renderExpanded && (
                     <td className="text-center text-gray-400">
                       {isExpanded ? '▼' : '▶'}

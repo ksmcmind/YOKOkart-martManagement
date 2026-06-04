@@ -12,6 +12,7 @@ const NAV = [
     { to: '/products', label: 'Products', icon: '🛍️' },
     { to: '/orders', label: 'Orders', icon: '📦' },
     { to: '/inventory', label: 'Inventory', icon: '📋' },
+    { to: '/transfers', label: 'Received Goods', icon: '🚚' },
     { to: '/drivers', label: 'Drivers', icon: '🚴' },
     { to: '/returns', label: 'Returns', icon: '↩️' },
 ]

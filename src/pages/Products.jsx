@@ -37,16 +37,15 @@ const RETURN_POLICIES = [
 ]
 
 const SCHEMA_FIELDS = [
-    'name', 'brand', 'description', 'category_slug', 'subcategory_slug',
+    'product_code', 'name', 'brand_code', 'description', 'category_slug', 'subcategory_slug',
     'search_keywords', 'tags', 'is_active', 'is_veg', 'return_policy',
-    'hsn_code', 'gst_percentage', 'variant_id', 'variant_name',
-    'display_size', 'sku', 'barcode', 'plu_code', 'details', 'images',
-    'variant_is_active',
+    'hsn_code', 'gst_percentage',
 ]
 
 const FIELD_VALIDATORS = {
+    product_code: v => v?.trim() ? true : 'Required',
     name: v => v?.trim() ? true : 'Required',
-    brand: v => v?.trim() ? true : 'Required',
+    brand_code: v => v?.trim() ? true : 'Required',
     category_slug: v => v?.trim() ? true : 'Required',
 }
 
@@ -96,113 +95,36 @@ function getActiveChips(f, categories) {
 
 function FilterBar({ draft, setDraft, onSearch, onReset, categories, loading }) {
     const [expanded, setExpanded] = useState(false)
-    const [suggestions, setSuggestions] = useState([])
-    const [suggestLoading, setSuggestLoading] = useState(false)
-    const [showSuggest, setShowSuggest] = useState(false)
-    const suggestRef = useRef(null)
 
     const set = (k, v) => setDraft(p => ({ ...p, [k]: v }))
 
-    // Debounced autocomplete
+    // Debounced search on typing
     useEffect(() => {
-        const q = draft.search?.trim()
-        if (!q || q.length < 2) {
-            setSuggestions([])
-            return
-        }
-
-        const timer = setTimeout(async () => {
-            setSuggestLoading(true)
-            try {
-                const res = await api.get(`/products/autocomplete?q=${encodeURIComponent(q)}`)
-                console.log('[Autocomplete] Response:', res)
-                if (res.success) {
-                    setSuggestions(res.data?.suggestions || [])
-                    setShowSuggest(true)
-                }
-            } catch (err) {
-                console.error('[Autocomplete] Failed:', err)
-            } finally {
-                setSuggestLoading(false)
-            }
-        }, 400)
-
+        const timer = setTimeout(() => {
+            onSearch()
+        }, 300)
         return () => clearTimeout(timer)
     }, [draft.search])
-
-    // Close on click outside
-    useEffect(() => {
-        const clickOut = (e) => {
-            if (suggestRef.current && !suggestRef.current.contains(e.target)) {
-                setShowSuggest(false)
-            }
-        }
-        document.addEventListener('mousedown', clickOut)
-        return () => document.removeEventListener('mousedown', clickOut)
-    }, [])
-
-    const handleSelect = (val) => {
-        set('search', val)
-        setShowSuggest(false)
-        // Delay slightly to let state update before committing
-        setTimeout(onSearch, 50)
-    }
 
     return (
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm transition-all">
             <div className="p-3 flex flex-wrap gap-3 items-center">
-                <div className="relative flex-1 min-w-[200px]" ref={suggestRef}>
+                <div className="relative flex-1 min-w-[200px]">
                     <input
                         type="text"
                         placeholder="Search products by name, code, brand..."
                         className="w-full pl-9 pr-4 py-2 bg-gray-50 border-none rounded-lg text-sm focus:ring-0 focus:outline-none transition-all"
                         value={draft.search}
-                        onChange={e => { set('search', e.target.value); setShowSuggest(true) }}
+                        onChange={e => set('search', e.target.value)}
                         onKeyDown={e => {
                             if (e.key === 'Enter') {
                                 onSearch()
-                                setShowSuggest(false)
                             }
                         }}
-                        onFocus={() => suggestions.length > 0 && setShowSuggest(true)}
                     />
                     <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                     </svg>
-                    {suggestLoading && (
-                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                            <div className="w-3 h-3 border-2 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
-                        </div>
-                    )}
-
-                    {/* Suggestions Dropdown */}
-                    {showSuggest && draft.search.length >= 2 && (
-                        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-gray-100 rounded-xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150 max-h-60 overflow-y-auto">
-                            {suggestions.length > 0 ? (
-                                suggestions.map((s, i) => (
-                                    <button
-                                        key={i}
-                                        onClick={() => handleSelect(s.name)}
-                                        className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-primary-50 border-b border-gray-50 last:border-none flex items-center justify-between transition-colors"
-                                    >
-                                        <div className="flex items-center gap-3">
-                                            <svg className="w-3.5 h-3.5 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                                            </svg>
-                                            <span className="font-medium truncate max-w-[150px] sm:max-w-[200px]">{s.name}</span>
-                                        </div>
-                                        {s.brand && (
-                                            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{s.brand}</span>
-                                        )}
-                                    </button>
-                                ))
-                            ) : !suggestLoading ? (
-                                <div className="px-4 py-3 text-xs text-gray-400 italic bg-gray-50/50">
-                                    No products found for "{draft.search}"
-                                </div>
-                            ) : null}
-                        </div>
-                    )}
                 </div>
 
                 <div className="flex gap-2">
@@ -356,7 +278,7 @@ function VariantEditor({ variants, onChange, isEdit }) {
 
 export default function Products() {
     const dispatch = useDispatch()
-    const { user, isSuperAdmin, martId } = useAuth()
+    const { user, isSuperAdmin } = useAuth()
     const categories = useSelector(selectAllCategories)
     const loading = useSelector(selectProductLoading)
     const saving = useSelector(selectProductSaving)
@@ -387,10 +309,8 @@ export default function Products() {
     // If the last request failed (e.g. rate limit), stop retrying automatically.
     // Error is cleared when the user actively changes a filter so they can try again.
     useEffect(() => {
-        // If no martId and user is NOT a super admin, block the fetch
-        if (!martId && !isSuperAdmin) return 
-        dispatch(fetchProducts({ ...committedFilters, martId: martId || null }))
-    }, [dispatch, committedFilters, martId, isSuperAdmin])
+        dispatch(fetchProducts(committedFilters))
+    }, [dispatch, committedFilters])
 
     const handleSearch = () => setCommittedFilters({ ...draftFilters, page: 1 })
     const handleReset = () => {
@@ -518,29 +438,15 @@ export default function Products() {
     )
 
     const groupRowsToProducts = (rows) => {
-        const map = new Map()
-        rows.forEach(r => {
-            const key = `${r.name?.trim().toLowerCase()}::${r.brand?.trim().toLowerCase()}`
-            if (!map.has(key)) {
-                map.set(key, {
-                    ...r,
-                    is_active: r.is_active?.toLowerCase() === 'true',
-                    is_veg: r.is_veg?.toLowerCase() === 'true',
-                    gst_percentage: parseFloat(r.gst_percentage || 0),
-                    search_keywords: r.search_keywords?.split('|').map(t => t.trim()).filter(Boolean) || [],
-                    tags: r.tags?.split('|').map(t => t.trim()).filter(Boolean) || [],
-                    variants: [],
-                })
-            }
-            map.get(key).variants.push({
-                variant_id: r.variant_id, variant_name: r.variant_name, display_size: r.display_size,
-                sku: r.sku, barcode: r.barcode, plu_code: r.plu_code,
-                details: r.details || '{}',
-                images: r.images?.split('|').map(u => u.trim()).filter(Boolean) || [],
-                is_active: r.variant_is_active?.toLowerCase() === 'true',
-            })
-        })
-        return [...map.values()]
+        return rows.map(r => ({
+            ...r,
+            is_active: r.is_active?.toLowerCase() !== 'false',
+            is_veg: r.is_veg?.toLowerCase() !== 'false',
+            gst_percentage: parseFloat(r.gst_percentage || 0),
+            search_keywords: r.search_keywords?.split('|').map(t => t.trim()).filter(Boolean) || [],
+            tags: r.tags?.split('|').map(t => t.trim()).filter(Boolean) || [],
+            variants: [],
+        }))
     }
 
     const activeChips = getActiveChips(committedFilters, categories)
@@ -674,7 +580,7 @@ export default function Products() {
                     return action.payload;
                 }}
                 groupRows={groupRowsToProducts}
-                onDone={() => dispatch(fetchProducts({ categorySlug, subcategorySlug, search, martId: martId || null }))}
+                onDone={() => dispatch(fetchProducts({ categorySlug, subcategorySlug, search }))}
             />
         </div>
     )

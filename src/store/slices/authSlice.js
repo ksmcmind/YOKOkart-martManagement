@@ -36,12 +36,16 @@ export const verifyOtp = createAsyncThunk('auth/verifyOtp', async ({ phone, otp 
     if (!user.id) return rejectWithValue('No mart assigned. Contact admin.')
 
     localStorage.setItem(KEY, JSON.stringify(user))
+    if (res.data.token) {
+        localStorage.setItem('ksmcm_mart_token', res.data.token)
+    }
     return res.data
 })
 
 export const logout = createAsyncThunk('auth/logout', async () => {
     try { await api.post('/auth/logout') } catch { }
     localStorage.removeItem(KEY)
+    localStorage.removeItem('ksmcm_mart_token')
 })
 
 const cached = loadUser()
@@ -62,6 +66,7 @@ const authSlice = createSlice({
             s.user = null
             s.isLoggedIn = false
             localStorage.removeItem(KEY)
+            localStorage.removeItem('ksmcm_mart_token')
         },
     },
     extraReducers: (b) => {
