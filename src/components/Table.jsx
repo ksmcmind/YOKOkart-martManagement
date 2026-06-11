@@ -54,11 +54,14 @@ export default function Table({ columns, data, loading, emptyText = 'No data fou
                       {isExpanded ? '▼' : '▶'}
                     </td>
                   )}
-                  {columns.map(col => (
-                    <td key={col.key}>
-                      {col.render ? col.render(row) : row[col.key] ?? '—'}
-                    </td>
-                  ))}
+                  {columns.map(col => {
+                    const cellClass = typeof col.className === 'function' ? col.className(row) : (col.className || '')
+                    return (
+                      <td key={col.key} className={cellClass}>
+                        {col.render ? col.render(row) : row[col.key] ?? '—'}
+                      </td>
+                    )
+                  })}
                 </tr>
                 {isExpanded && renderExpanded && (
                   <tr className="bg-gray-50/50">

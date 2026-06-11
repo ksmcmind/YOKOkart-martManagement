@@ -9,6 +9,7 @@ import Modal from '../components/Modal'
 import Badge from '../components/Badge'
 import Input from '../components/Input'
 import useAuth from '../hooks/useAuth'
+import AlgoliaProductSearch from '../components/AlgoliaProductSearch'
 
 export default function Transfers() {
   const dispatch = useDispatch()
@@ -35,19 +36,20 @@ export default function Transfers() {
     notes: ''
   })
 
-  const [productSearchText, setProductSearchText] = useState('')
-  const [productDropdownOpen, setProductDropdownOpen] = useState(false)
-  const [selectedProduct, setSelectedProduct] = useState(null)
+  const [selectedProductLabel, setSelectedProductLabel] = useState('')
+  const [selectedProductVariants, setSelectedProductVariants] = useState([])
+  const [variantLoadingForProduct, setVariantLoadingForProduct] = useState(false)
 
-  const filteredProducts = useMemo(() => {
-    const q = productSearchText.toLowerCase().trim();
-    if (!q) return products;
-    return products.filter(p => {
-      const prodName = p.name.toLowerCase();
-      const brandName = (p.brand || '').toLowerCase();
-      return prodName.includes(q) || brandName.includes(q);
-    });
-  }, [products, productSearchText]);
+  // Returns state
+  const [activeTab, setActiveTab] = useState('transfers') // 'transfers' | 'returns'
+  const [returns, setReturns] = useState([])
+  const [returnOpen, setReturnOpen] = useState(false)
+  const [returnBatches, setReturnBatches] = useState([])
+  const [selectedReturnBatch, setSelectedReturnBatch] = useState(null)
+  const [batchSearchText, setBatchSearchText] = useState('')
+  const [batchDropdownOpen, setBatchDropdownOpen] = useState(false)
+  const [returnForm, setReturnForm] = useState({ qty: '', reason: '', notes: '' })
+  const [returnsLoading, setReturnsLoading] = useState(false)
 
   const formatDateDisplay = (dateStr) => {
     if (!dateStr) return '—'
@@ -77,8 +79,100 @@ export default function Transfers() {
     }
   }, [martId, dispatch])
 
+  const fetchReturns = useCallback(async () => {
+    if (!martId) return
+    setReturnsLoading(true)
+    try {
+      const res = await api.get(`/mart-returns/mart/${martId}`)
+      if (res.success) {
+        setReturns(res.data || [])
+      }
+    } catch (err) {
+      console.error(err)
+      dispatch(showToast({ message: 'Failed to retrieve returns list', type: 'error' }))
+    } finally {
+      setReturnsLoading(false)
+    }
+  }, [martId, dispatch])
+
+  const fetchReturnBatches = useCallback(async () => {
+    if (!martId) return
+    try {
+      const res = await api.get(`/mart-returns/mart/${martId}/batches`)
+      if (res.success) {
+        setReturnBatches(res.data || [])
+      }
+    } catch (err) {
+      console.error(err)
+    }
+  }, [martId])
+
+  const handleCancelReturn = async (returnId) => {
+    if (!window.confirm('Are you sure you want to cancel this return request?')) return
+    setSubmitting(true)
+    try {
+      const res = await api.patch(`/mart-returns/${returnId}/cancel`)
+      if (res.success) {
+        dispatch(showToast({ message: 'Return request cancelled successfully', type: 'success' }))
+        fetchReturns()
+      } else {
+        dispatch(showToast({ message: res.message || 'Cancellation failed', type: 'error' }))
+      }
+    } catch (err) {
+      dispatch(showToast({ message: 'Failed to cancel return request', type: 'error' }))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleCreateReturnSubmit = async () => {
+    const { qty, reason, notes } = returnForm
+    const qtyNum = parseFloat(qty)
+    if (!selectedReturnBatch) {
+      dispatch(showToast({ message: 'Please select a batch to return', type: 'error' }))
+      return
+    }
+    if (isNaN(qtyNum) || qtyNum <= 0) {
+      dispatch(showToast({ message: 'Please enter a valid positive quantity', type: 'error' }))
+      return
+    }
+    if (qtyNum > parseFloat(selectedReturnBatch.qty_remaining)) {
+      dispatch(showToast({ message: 'Cannot return more than available batch stock', type: 'error' }))
+      return
+    }
+    if (!reason) {
+      dispatch(showToast({ message: 'Please select a return reason', type: 'error' }))
+      return
+    }
+
+    setSubmitting(true)
+    try {
+      const res = await api.post(`/mart-returns/mart/${martId}`, {
+        martBatchId: selectedReturnBatch.id,
+        qty: qtyNum,
+        reason,
+        notes
+      })
+      if (res.success) {
+        dispatch(showToast({ message: 'Return request submitted successfully!', type: 'success' }))
+        setReturnOpen(false)
+        setReturnForm({ qty: '', reason: '', notes: '' })
+        setSelectedReturnBatch(null)
+        setBatchSearchText('')
+        fetchReturns()
+      } else {
+        dispatch(showToast({ message: res.message || 'Return request failed', type: 'error' }))
+      }
+    } catch (err) {
+      dispatch(showToast({ message: err?.response?.data?.message || err?.message || 'Failed to submit return request', type: 'error' }))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   useEffect(() => {
     fetchTransfers()
+    fetchReturns()
 
     // Fetch mart details to resolve associated warehouse
     if (martId) {
@@ -98,46 +192,33 @@ export default function Transfers() {
         if (res.success) setWarehouses(res.data || [])
       })
       .catch(console.error)
-  }, [martId, fetchTransfers])
+  }, [martId, fetchTransfers, fetchReturns])
 
-  // Fetch warehouse inventory when warehouseId changes
+  // Reset product selection when warehouseId changes
   useEffect(() => {
-    if (!requestForm.warehouseId) {
-      setProducts([])
-      return
-    }
-    api.get(`/warehouse-inventory/warehouse/${requestForm.warehouseId}?limit=5000`)
-      .then(res => {
-        if (res.success) {
-          const map = new Map();
-          const items = res.data || [];
-          items.forEach(item => {
-            const prodId = item.product_id;
-            if (!map.has(prodId)) {
-              map.set(prodId, {
-                product_id: prodId,
-                id: prodId,
-                name: item.product_name || item.productName || 'Generic Product',
-                brand: item.brand_name || item.brand || 'Generic',
-                variants: []
-              });
-            }
-            map.get(prodId).variants.push({
-              variant_id: item.variant_id,
-              variant_name: item.variant_name || item.variantName || 'Default',
-              variant_code: item.variant_code || item.variantCode,
-              sku: item.sku,
-              display_size: item.display_size,
-              bulk_stock_qty: item.bulk_stock_qty,
-              reserved_qty: item.reserved_qty,
-              available_qty: item.available_qty
-            });
-          });
-          setProducts(Array.from(map.values()));
-        }
-      })
-      .catch(console.error);
+    setSelectedProductLabel('')
+    setSelectedProductVariants([])
   }, [requestForm.warehouseId])
+
+  const fetchWarehouseVariantsForProduct = async (productId) => {
+    if (!requestForm.warehouseId || !productId) return
+    setVariantLoadingForProduct(true)
+    try {
+      const res = await api.get(
+        `/warehouse-inventory/warehouse/${requestForm.warehouseId}?product_id=${productId}&limit=200`
+      )
+      if (res.success) {
+        setSelectedProductVariants(res.data || [])
+      } else {
+        setSelectedProductVariants([])
+      }
+    } catch (err) {
+      console.error('[fetchWarehouseVariants]', err)
+      setSelectedProductVariants([])
+    } finally {
+      setVariantLoadingForProduct(false)
+    }
+  }
 
   // Filter transfers list by status tab
   const filteredTransfers = useMemo(() => {
@@ -236,8 +317,8 @@ export default function Transfers() {
         dispatch(showToast({ message: 'Stock request submitted successfully!', type: 'success' }))
         setRequestOpen(false)
         setRequestForm({ warehouseId: associatedWarehouseId, productId: '', variantId: '', qtyRequested: '', notes: '' })
-        setProductSearchText('')
-        setSelectedProduct(null)
+        setSelectedProductLabel('')
+        setSelectedProductVariants([])
         fetchTransfers()
       } else {
         dispatch(showToast({ message: res.message || 'Request failed', type: 'error' }))
@@ -344,81 +425,246 @@ export default function Transfers() {
     }
   ]
 
+  const returnColumns = [
+    {
+      key: 'return_code',
+      label: 'Return Code',
+      render: (row) => (
+        <div>
+          <span className="font-mono font-bold text-rose-600">#MR-{row.return_code}</span>
+          <p className="text-[10px] text-slate-400 font-medium mt-0.5">
+            {formatDateDisplay(row.created_at)}
+          </p>
+        </div>
+      )
+    },
+    {
+      key: 'item_details',
+      label: 'Item / Batch Details',
+      render: (row) => (
+        <div>
+          <span className="font-bold text-slate-800">{row.product_name || 'Generic SKU'}</span>
+          {row.brand_name && (
+            <span className="ml-2 bg-amber-50 text-amber-800 text-[8px] font-extrabold px-1 py-0.5 rounded border border-amber-200 uppercase tracking-wider">
+              🏷️ {row.brand_name}
+            </span>
+          )}
+          <p className="text-[10px] font-mono text-slate-400 mt-0.5">
+            Batch: {row.batch_number} {row.expiry_date ? `| Exp: ${formatDateDisplay(row.expiry_date)}` : ''}
+          </p>
+        </div>
+      )
+    },
+    {
+      key: 'warehouse_name',
+      label: 'Target Warehouse',
+      render: (row) => <span className="font-semibold text-slate-700">🏭 {row.warehouse_name || 'Main Warehouse'}</span>
+    },
+    {
+      key: 'qty_returned',
+      label: 'Qty Returned',
+      className: 'text-right',
+      render: (row) => <span className="font-bold text-slate-700">{parseFloat(row.qty_returned).toLocaleString()}</span>
+    },
+    {
+      key: 'reason',
+      label: 'Reason',
+      render: (row) => {
+        let badgeCol = 'gray'
+        if (row.reason === 'expired') badgeCol = 'red'
+        if (row.reason === 'damage') badgeCol = 'yellow'
+        if (row.reason === 'near_expiry') badgeCol = 'blue'
+        return <Badge variant={badgeCol}>{row.reason.replace(/_/g, ' ').toUpperCase()}</Badge>
+      }
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (row) => {
+        let badgeCol = 'gray'
+        if (row.status === 'requested') badgeCol = 'yellow'
+        if (row.status === 'accepted') badgeCol = 'green'
+        if (row.status === 'rejected') badgeCol = 'red'
+        if (row.status === 'cancelled') badgeCol = 'gray'
+        return <Badge variant={badgeCol}>{row.status.toUpperCase()}</Badge>
+      }
+    },
+    {
+      key: 'remarks',
+      label: 'Remarks / Notes',
+      render: (row) => (
+        <div className="max-w-xs truncate text-xs text-slate-500">
+          {row.status === 'rejected' ? (
+            <span className="text-rose-600 font-medium">Rejection Reason: {row.rejection_reason}</span>
+          ) : (
+            row.notes || '—'
+          )}
+        </div>
+      )
+    },
+    {
+      key: 'actions',
+      label: '',
+      render: (row) => (
+        <div className="flex gap-1.5 justify-end">
+          {row.status === 'requested' && (
+            <Button
+              variant="secondary"
+              size="sm"
+              className="text-rose-600 hover:text-rose-800 border border-rose-200 hover:bg-rose-50"
+              disabled={submitting}
+              onClick={() => handleCancelReturn(row.return_id)}
+            >
+              ✕ Cancel Return
+            </Button>
+          )}
+        </div>
+      )
+    }
+  ]
+
+  const filteredReturnBatches = useMemo(() => {
+    const q = batchSearchText.toLowerCase().trim()
+    if (!q) return returnBatches
+    return returnBatches.filter(b => 
+      (b.batch_number || '').toLowerCase().includes(q) ||
+      (b.product_name || b.productName || '').toLowerCase().includes(q) ||
+      (b.variant_sku || '').toLowerCase().includes(q)
+    )
+  }, [returnBatches, batchSearchText])
+
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Received Goods"
-        subtitle="Verify and check-in stock transfer dispatches arriving from warehouse facilities."
+        title={activeTab === 'transfers' ? "Received Goods" : "Stock Returns"}
+        subtitle={activeTab === 'transfers' ? "Verify and check-in stock transfer dispatches arriving from warehouse facilities." : "Create and manage returns of damaged, expired or near-expiry stock back to the warehouse."}
         action={
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={fetchTransfers}>↻ Refresh</Button>
-            <Button variant="primary" className="bg-indigo-600 hover:bg-indigo-700" onClick={() => {
-              setRequestForm({
-                warehouseId: associatedWarehouseId,
-                productId: '',
-                variantId: '',
-                qtyRequested: '',
-                notes: ''
-              });
-              setProductSearchText('');
-              setSelectedProduct(null);
-              setRequestOpen(true);
-            }}>+ Request Stock</Button>
+            <Button variant="secondary" onClick={activeTab === 'transfers' ? fetchTransfers : fetchReturns}>↻ Refresh</Button>
+            {activeTab === 'transfers' ? (
+              <Button variant="primary" className="bg-indigo-600 hover:bg-indigo-700" onClick={() => {
+                setRequestForm({
+                  warehouseId: associatedWarehouseId,
+                  productId: '',
+                  variantId: '',
+                  qtyRequested: '',
+                  notes: ''
+                });
+                setProductSearchText('');
+                setSelectedProduct(null);
+                setRequestOpen(true);
+              }}>+ Request Stock</Button>
+            ) : (
+              <Button variant="primary" className="bg-rose-600 hover:bg-rose-700" onClick={() => {
+                fetchReturnBatches();
+                setReturnForm({
+                  qty: '',
+                  reason: '',
+                  notes: ''
+                });
+                setBatchSearchText('');
+                setSelectedReturnBatch(null);
+                setReturnOpen(true);
+              }}>+ Return Stock</Button>
+            )}
           </div>
         }
       />
 
-      {/* Stats Summary cards */}
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
-        {[
-          { label: 'Total Tickets', value: stats.total, icon: '📋', border: 'border-slate-100', sub: 'Dispatches processed or incoming' },
-          { label: 'Requested', value: stats.requested, icon: '✍️', border: 'border-yellow-100 bg-yellow-50/10', sub: 'Pending dispatch by Warehouse' },
-          { label: 'In Transit', value: stats.inTransit, icon: '🚚', border: 'border-blue-100 bg-blue-50/10', sub: 'On the road from Warehouse' },
-          { label: 'Received', value: stats.received, icon: '🟢', border: 'border-emerald-100 bg-emerald-50/10', sub: 'Checked in at this mart' },
-          { label: 'Cancelled', value: stats.cancelled, icon: '❌', border: 'border-rose-100 bg-rose-50/10', sub: 'Cancelled dispatches' }
-        ].map((item, idx) => (
-          <div key={idx} className={`bg-white border ${item.border} rounded-2xl p-4 shadow-sm flex flex-col justify-between hover:shadow transition-shadow duration-150`}>
-            <div className="flex items-center justify-between gap-1.5">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{item.label}</span>
-              <span className="text-sm">{item.icon}</span>
-            </div>
-            <div className="mt-2.5">
-              <span className="text-xl font-extrabold text-slate-900">{item.value}</span>
-              <p className="text-[9px] text-slate-400 font-medium leading-snug mt-1">{item.sub}</p>
-            </div>
+      {/* Tab Switcher */}
+      <div className="flex items-center gap-6 border-b border-slate-100 pb-px">
+        <button
+          onClick={() => setActiveTab('transfers')}
+          className={`px-4 py-2 text-sm font-bold transition-all duration-150 border-b-2 -mb-px ${
+            activeTab === 'transfers'
+              ? 'border-indigo-600 text-indigo-600'
+              : 'border-transparent text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          🚚 Inbound Transfers
+        </button>
+        <button
+          onClick={() => setActiveTab('returns')}
+          className={`px-4 py-2 text-sm font-bold transition-all duration-150 border-b-2 -mb-px ${
+            activeTab === 'returns'
+              ? 'border-indigo-600 text-indigo-600'
+              : 'border-transparent text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          ↩️ Returns to Warehouse
+        </button>
+      </div>
+
+      {activeTab === 'transfers' ? (
+        <>
+          {/* Stats Summary cards */}
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
+            {[
+              { label: 'Total Tickets', value: stats.total, icon: '📋', border: 'border-slate-100', sub: 'Dispatches processed or incoming' },
+              { label: 'Requested', value: stats.requested, icon: '✍️', border: 'border-yellow-100 bg-yellow-50/10', sub: 'Pending dispatch by Warehouse' },
+              { label: 'In Transit', value: stats.inTransit, icon: '🚚', border: 'border-blue-100 bg-blue-50/10', sub: 'On the road from Warehouse' },
+              { label: 'Received', value: stats.received, icon: '🟢', border: 'border-emerald-100 bg-emerald-50/10', sub: 'Checked in at this mart' },
+              { label: 'Cancelled', value: stats.cancelled, icon: '❌', border: 'border-rose-100 bg-rose-50/10', sub: 'Cancelled dispatches' }
+            ].map((item, idx) => (
+              <div key={idx} className={`bg-white border ${item.border} rounded-2xl p-4 shadow-sm flex flex-col justify-between hover:shadow transition-shadow duration-150`}>
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{item.label}</span>
+                  <span className="text-sm">{item.icon}</span>
+                </div>
+                <div className="mt-2.5">
+                  <span className="text-xl font-extrabold text-slate-900">{item.value}</span>
+                  <p className="text-[9px] text-slate-400 font-medium leading-snug mt-1">{item.sub}</p>
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
 
-      {/* Filter status tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-100 pb-px">
-        {['all', 'created', 'dispatched', 'received', 'cancelled'].map(tab => (
-          <button
-            key={tab}
-            onClick={() => setStatusFilter(tab)}
-            className={`px-4 py-2 text-xs font-bold transition-all duration-150 border-b-2 -mb-px ${
-              statusFilter === tab
-                ? 'border-primary-600 text-primary-600'
-                : 'border-transparent text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            {tab === 'created' ? 'REQUESTED' : tab.toUpperCase()}
-          </button>
-        ))}
-      </div>
+          {/* Filter status tabs */}
+          <div className="flex items-center gap-2 border-b border-slate-100 pb-px">
+            {['all', 'created', 'dispatched', 'received', 'cancelled'].map(tab => (
+              <button
+                key={tab}
+                onClick={() => setStatusFilter(tab)}
+                className={`px-4 py-2 text-xs font-bold transition-all duration-150 border-b-2 -mb-px ${
+                  statusFilter === tab
+                    ? 'border-primary-600 text-primary-600'
+                    : 'border-transparent text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                {tab === 'created' ? 'REQUESTED' : tab.toUpperCase()}
+              </button>
+            ))}
+          </div>
 
-      {/* Grid */}
-      <Grid
-        columns={columns}
-        data={filteredTransfers}
-        loading={loading}
-        emptyText="No dispatches found."
-        pagination={true}
-        pageSize={15}
-        showSearch={true}
-        searchPlaceholder="Search dispatches..."
-        searchKey={(item, query) => [item.transfer_id, item.warehouse_name, item.productName || item.product_name, item.status].some(v => String(v || '').toLowerCase().includes(query))}
-      />
+          {/* Grid */}
+          <Grid
+            columns={columns}
+            data={filteredTransfers}
+            loading={loading}
+            emptyText="No dispatches found."
+            pagination={true}
+            pageSize={15}
+            showSearch={true}
+            searchPlaceholder="Search dispatches..."
+            searchKey={(item, query) => [item.transfer_id, item.warehouse_name, item.productName || item.product_name, item.status].some(v => String(v || '').toLowerCase().includes(query))}
+          />
+        </>
+      ) : (
+        <>
+          {/* Returns Grid */}
+          <Grid
+            columns={returnColumns}
+            data={returns}
+            loading={returnsLoading}
+            emptyText="No returns recorded."
+            pagination={true}
+            pageSize={15}
+            showSearch={true}
+            searchPlaceholder="Search returns..."
+            searchKey={(item, query) => [item.return_code, item.warehouse_name, item.product_name, item.status, item.reason].some(v => String(v || '').toLowerCase().includes(query))}
+          />
+        </>
+      )}
 
       {/* Request Stock Modal */}
       <Modal
@@ -454,53 +700,38 @@ export default function Transfers() {
             )}
           </div>
 
-          <div className="flex flex-col gap-1 relative">
-            <label className="text-xs font-bold text-slate-700">Select Product *</label>
-            <input
-              type="text"
-              required
-              placeholder="🔍 Search product by name or brand..."
-              value={productSearchText}
-              onChange={(e) => {
-                setProductSearchText(e.target.value);
-                setProductDropdownOpen(true);
-              }}
-              onFocus={() => setProductDropdownOpen(true)}
-              onBlur={() => setTimeout(() => setProductDropdownOpen(false), 200)}
-              className="w-full text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:border-indigo-500 focus:outline-none transition-colors"
-            />
-            {productDropdownOpen && (
-              <div className="absolute left-0 right-0 z-50 bg-white border border-slate-200 rounded-xl shadow-xl max-h-48 overflow-y-auto top-full mt-1 p-1">
-                {filteredProducts
-                  .map(p => {
-                    const isSelected = selectedProduct?.id === p.id || selectedProduct?.product_id === p.product_id;
-                    return (
-                      <button
-                        key={p.product_id || p.id || p._id}
-                        type="button"
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          setSelectedProduct(p);
-                          setRequestForm(prev => ({
-                            ...prev,
-                            productId: p.product_id || p.id || p._id,
-                            variantId: ''
-                          }));
-                          setProductSearchText(`${p.name} ${p.brand ? `(${p.brand})` : ''}`);
-                          setProductDropdownOpen(false);
-                        }}
-                        className={`w-full text-left text-xs font-semibold text-slate-700 px-3 py-2 rounded-lg hover:bg-slate-50 transition-colors duration-150 border-b border-slate-100 flex flex-col gap-0.5 ${isSelected ? 'bg-indigo-50 text-indigo-900' : ''}`}
-                      >
-                        <span className="font-bold">{p.name} {p.brand ? `(${p.brand})` : ''}</span>
-                        <span className="text-[10px] text-slate-400 font-mono">{(p.variants || []).length} variant(s)</span>
-                      </button>
-                    );
-                  })}
-              </div>
-            )}
-          </div>
+          <AlgoliaProductSearch
+            mode="product"
+            label="Select Product *"
+            value={selectedProductLabel}
+            placeholder="Search catalog by name or brand…"
+            onSelect={async (prod) => {
+              const label = `${prod.productName} (${prod.brandName})`
+              setSelectedProductLabel(label)
+              setSelectedProductVariants([])
+              setRequestForm(prev => ({
+                ...prev,
+                productId: prod.productId,
+                variantId: ''
+              }))
+              // Fetch REAL warehouse variants for this product (correct UUIDs + stock)
+              await fetchWarehouseVariantsForProduct(prod.productId)
+            }}
+            onClear={() => {
+              setSelectedProductLabel('')
+              setSelectedProductVariants([])
+              setRequestForm(prev => ({ ...prev, productId: '', variantId: '' }))
+            }}
+          />
 
-          {selectedProduct && (
+          {variantLoadingForProduct && (
+            <div className="flex items-center gap-2 py-2 text-xs text-slate-400">
+              <div className="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+              Loading warehouse stock for this product…
+            </div>
+          )}
+
+          {!variantLoadingForProduct && selectedProductVariants.length > 0 && (
             <div className="flex flex-col gap-1">
               <label className="text-xs font-bold text-slate-700">Select Variant *</label>
               <select
@@ -510,21 +741,26 @@ export default function Transfers() {
                 className="w-full text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:border-indigo-500 focus:outline-none transition-colors"
               >
                 <option value="">-- Choose Variant --</option>
-                {(selectedProduct.variants || []).map(v => {
-                  const avail = v.available_qty || 0;
+                {selectedProductVariants.map((v, i) => {
+                  const variantId = v.variant_id
+                  const variantName = v.variant_name || v.variantName || v.sku || 'Default'
+                  const sku = v.variant_sku || v.sku || 'N/A'
+                  const avail = parseFloat(v.available_qty ?? v.qty_available ?? 0)
+                  const isOutOfStock = avail <= 0
                   return (
-                    <option key={v.variant_id || v.variantId || v.sku} value={v.variant_id || v.variantId || v.sku} disabled={avail <= 0}>
-                      {v.variant_name || v.variant_code || 'Default'} (SKU: {v.sku}) -- Available: {avail} units
+                    <option key={variantId || i} value={variantId} disabled={isOutOfStock}>
+                      {variantName} · SKU: {sku} · {isOutOfStock ? '❌ Out of stock' : `Available: ${avail.toLocaleString()} pcs`}
                     </option>
-                  );
+                  )
                 })}
-                {(!selectedProduct.variants || selectedProduct.variants.length === 0) && (
-                  <option value={selectedProduct.product_id || selectedProduct.id || selectedProduct._id}>
-                    Default Variant
-                  </option>
-                )}
               </select>
             </div>
+          )}
+
+          {!variantLoadingForProduct && requestForm.productId && selectedProductVariants.length === 0 && (
+            <p className="text-xs text-amber-600 font-semibold bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              ⚠️ No warehouse stock found for this product.
+            </p>
           )}
 
           <Input
@@ -582,6 +818,111 @@ export default function Transfers() {
             </span>
           </div>
         )}
+      </Modal>
+
+      {/* Return to Warehouse Modal */}
+      <Modal
+        title="Return Damaged / Expired Stock to Warehouse"
+        open={returnOpen}
+        onClose={() => setReturnOpen(false)}
+        size="sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setReturnOpen(false)} disabled={submitting}>Cancel</Button>
+            <Button variant="primary" className="bg-rose-600 hover:bg-rose-700" loading={submitting} onClick={handleCreateReturnSubmit}>Submit Return Request</Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="flex flex-col gap-1 relative">
+            <label className="text-xs font-bold text-slate-700">Select Batch to Return *</label>
+            <input
+              type="text"
+              required
+              placeholder="🔍 Search batch number, SKU or product name..."
+              value={batchSearchText}
+              onChange={(e) => {
+                setBatchSearchText(e.target.value);
+                setBatchDropdownOpen(true);
+              }}
+              onFocus={() => setBatchDropdownOpen(true)}
+              onBlur={() => setTimeout(() => setBatchDropdownOpen(false), 200)}
+              className="w-full text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:border-indigo-500 focus:outline-none transition-colors"
+            />
+            {batchDropdownOpen && (
+              <div className="absolute left-0 right-0 z-50 bg-white border border-slate-200 rounded-xl shadow-xl max-h-48 overflow-y-auto top-full mt-1 p-1">
+                {filteredReturnBatches.length === 0 ? (
+                  <div className="p-3 text-center text-xs text-slate-400 font-medium">No returnable batches found</div>
+                ) : (
+                  filteredReturnBatches.map(b => (
+                    <button
+                      key={b.id}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setSelectedReturnBatch(b);
+                        setBatchSearchText(`${b.batch_number} — ${b.product_name || 'Generic Product'}`);
+                        setBatchDropdownOpen(false);
+                      }}
+                      className={`w-full text-left text-xs font-semibold text-slate-700 px-3 py-2 rounded-lg hover:bg-slate-50 transition-colors duration-150 border-b border-slate-100 flex flex-col gap-0.5 ${selectedReturnBatch?.id === b.id ? 'bg-rose-50 text-rose-900' : ''}`}
+                    >
+                      <span className="font-bold">{b.product_name}</span>
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        Batch: {b.batch_number} | Exp: {formatDateDisplay(b.expiry_date)} | Stock: {parseFloat(b.qty_remaining).toLocaleString()}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {selectedReturnBatch && (
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3.5 space-y-1 text-xs text-slate-600 font-medium">
+              <div>📦 Batch Qty Available: <strong className="text-slate-800">{parseFloat(selectedReturnBatch.qty_remaining).toLocaleString()} units</strong></div>
+              <div>📅 Expiry Date: <strong className="text-slate-800">{formatDateDisplay(selectedReturnBatch.expiry_date)}</strong></div>
+              <div>💰 COGS Cost: <strong className="text-slate-800">₹{selectedReturnBatch.cogs}</strong></div>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-bold text-slate-700">Reason for Return *</label>
+            <select
+              required
+              className="w-full text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:border-indigo-500 focus:outline-none transition-colors"
+              value={returnForm.reason}
+              onChange={e => setReturnForm(prev => ({ ...prev, reason: e.target.value }))}
+            >
+              <option value="">Select Reason</option>
+              <option value="damage">💥 Damage</option>
+              <option value="expired">⏰ Expired</option>
+              <option value="near_expiry">📅 Near Expiry</option>
+              <option value="quality_issue">❌ Quality Issue</option>
+              <option value="wrong_item">📦 Wrong Item</option>
+            </select>
+          </div>
+
+          <Input
+            label="Quantity to Return *"
+            type="number"
+            required
+            min="1"
+            max={selectedReturnBatch ? parseFloat(selectedReturnBatch.qty_remaining) : undefined}
+            value={returnForm.qty}
+            onChange={e => setReturnForm(prev => ({ ...prev, qty: e.target.value }))}
+          />
+
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-bold text-slate-700">Notes (Optional)</label>
+            <textarea
+              className="w-full text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:border-indigo-500 focus:outline-none transition-colors"
+              rows="3"
+              placeholder="Provide details about return (e.g., condition of packaging)..."
+              value={returnForm.notes}
+              onChange={e => setReturnForm(prev => ({ ...prev, notes: e.target.value }))}
+            />
+          </div>
+        </div>
       </Modal>
     </div>
   )

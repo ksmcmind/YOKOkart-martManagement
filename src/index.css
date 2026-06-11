@@ -76,6 +76,36 @@
     .table tbody tr {
         @apply hover:bg-gray-50 transition-colors;
     }
+    .table tbody tr.bg-red-900 td {
+        background-color: #7f1d1d !important;
+        color: #ffffff !important;
+    }
+    .table tbody tr.bg-red-900 td * {
+        color: #ffffff !important;
+    }
+    .table tbody tr.bg-red-900 td:first-child {
+        border-left: 4px solid #dc2626 !important;
+    }
+    .table tbody tr.bg-orange-50 td {
+        background-color: #fff7ed !important;
+        color: #7c2d12 !important;
+    }
+    .table tbody tr.bg-orange-50 td * {
+        color: #7c2d12 !important;
+    }
+    .table tbody tr.bg-orange-50 td:first-child {
+        border-left: 4px solid #f97316 !important;
+    }
+    .table tbody tr.bg-red-50 td {
+        background-color: #fef2f2 !important;
+        color: #7f1d1d !important;
+    }
+    .table tbody tr.bg-red-50 td * {
+        color: #7f1d1d !important;
+    }
+    .table tbody tr.bg-red-50 td:first-child {
+        border-left: 4px solid #ef4444 !important;
+    }
 
     .badge {
         @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;

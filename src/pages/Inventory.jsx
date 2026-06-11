@@ -37,6 +37,7 @@ import Input, { Select } from '../components/Input'
 import BulkUploadModal from '../components/BulkUploadModal'
 import useAuth from '../hooks/useAuth'
 import api from '../api/index'
+import AlgoliaProductSearch from '../components/AlgoliaProductSearch'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -94,7 +95,7 @@ const downloadXLSXTemplate = () => {
 // ── Empty forms ───────────────────────────────────────────────────────────────
 
 const EMPTY_FORM = {
-    product_id: '', variant_id: '', sale_price: '', mrp: '',
+    product_id: '', variant_id: '', variant_label: '', sale_price: '', mrp: '',
     stock_qty: '', stock_unit: 'pcs', low_stock_alert: '10',
     type: 'restock', expiry_date: '', batch_number: '', aisle_location: '', is_active: true,
 }
@@ -899,30 +900,32 @@ export default function Inventory() {
         {
             key: 'product', label: 'Product',
             render: r => (
-                <div>
+                <div className="space-y-0.5">
                     <p className="font-bold text-gray-900 text-xs leading-tight">{r.product_name || 'Unknown'}</p>
-                    {r.brand_name && (
-                        <div className="mt-1">
-                            <span className="bg-amber-50 text-amber-800 text-[8px] font-extrabold px-1 py-0.5 rounded border border-amber-200 uppercase tracking-wider">
-                                🏷️ {r.brand_name}
-                            </span>
-                        </div>
-                    )}
-                    {r.display_size && (
-                        <div className="text-[10px] text-slate-400 font-bold mt-0.5">{r.display_size}</div>
-                    )}
-                    <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border border-gray-200 mt-1 inline-block">#{r.product_code}</span>
+                    <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border border-gray-200 inline-block">#{r.product_code}</span>
                 </div>
             ),
         },
         {
             key: 'variant', label: 'Variant',
             render: r => (
-                <div className="flex items-center gap-1.5">
-                    <span className="bg-blue-50 text-blue-700 text-[9px] font-extrabold px-1.5 py-0.5 rounded border border-blue-100 uppercase">
-                        {r.variant_code || 'default'}
-                    </span>
-                    {r.variant_name && <span className="text-[10px] text-gray-500">{r.variant_name}</span>}
+                <div className="space-y-0.5">
+                    <p className="font-semibold text-gray-800 text-xs leading-tight">{r.variant_name || '—'}</p>
+                    <div className="flex items-center gap-1 flex-wrap">
+                        <span className="bg-blue-50 text-blue-700 text-[9px] font-extrabold px-1.5 py-0.5 rounded border border-blue-100 uppercase font-mono">
+                            {r.variant_code || 'default'}
+                        </span>
+                        {r.display_size && (
+                            <span className="bg-violet-50 text-violet-700 text-[9px] font-bold px-1.5 py-0.5 rounded border border-violet-100 uppercase">
+                                {r.display_size}
+                            </span>
+                        )}
+                        {r.unit_type && (
+                            <span className="bg-teal-50 text-teal-700 text-[9px] font-bold px-1.5 py-0.5 rounded border border-teal-100 uppercase">
+                                {r.unit_type}
+                            </span>
+                        )}
+                    </div>
                 </div>
             ),
         },
@@ -930,14 +933,6 @@ export default function Inventory() {
         {
             key: 'stock', label: 'Available',
             render: r => <span className="font-bold text-gray-800 text-xs">{parseFloat(r.stock_qty).toLocaleString()} <span className="text-[9px] text-gray-500 uppercase">pcs</span></span>,
-        },
-        {
-            key: 'reserved', label: 'Reserved',
-            render: r => <span className="font-bold text-yellow-600 text-xs">{r.reserved_qty ?? 0}</span>,
-        },
-        {
-            key: 'dispatched', label: 'Dispatched',
-            render: r => <span className="font-bold text-blue-600 text-xs">{r.dispatched_qty ?? 0}</span>,
         },
         {
             key: 'expiry', label: 'Expiry',
@@ -1026,23 +1021,20 @@ export default function Inventory() {
         {
             key: 'details', label: 'Product & Variant Details',
             render: r => (
-                <div>
-                    <p className="font-bold text-gray-900 leading-tight text-xs">{r.product_name || 'Unknown Product'}</p>
-                    {r.display_size && (
-                        <div className="text-[10px] text-slate-400 font-bold mt-0.5">{r.display_size}</div>
-                    )}
-                    <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                        {r.brand_name && (
-                            <span className="bg-amber-50 text-amber-800 text-[9px] font-extrabold px-1.5 py-0.5 rounded border border-amber-200 uppercase tracking-wider">
-                                🏷️ {r.brand_name}
-                            </span>
-                        )}
-                        <span className="bg-blue-50 text-blue-700 text-[9px] font-extrabold px-1.5 py-0.5 rounded border border-blue-100 uppercase">
+                <div className="space-y-0.5">
+                    <p className="font-bold text-gray-900 leading-tight text-xs">{r.variant_name || 'Unknown Variant'}</p>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="bg-blue-50 text-blue-700 text-[9px] font-extrabold px-1.5 py-0.5 rounded border border-blue-100 uppercase font-mono">
                             Var: {r.variant_code || 'default'}
                         </span>
-                        {r.variant_name && (
-                            <span className="text-[10px] font-medium text-gray-500 leading-normal">
-                                {r.variant_name}
+                        {r.display_size && (
+                            <span className="bg-violet-50 text-violet-700 text-[9px] font-bold px-1.5 py-0.5 rounded border border-violet-100 uppercase">
+                                {r.display_size}
+                            </span>
+                        )}
+                        {(r.stock_unit || r.unit_type) && (
+                            <span className="bg-teal-50 text-teal-700 text-[9px] font-bold px-1.5 py-0.5 rounded border border-teal-100 uppercase">
+                                {r.stock_unit || r.unit_type}
                             </span>
                         )}
                     </div>
@@ -1085,7 +1077,7 @@ export default function Inventory() {
                         <div className="flex items-center gap-1">
                             <span className="text-gray-400 font-bold text-[9px] uppercase">Qty:</span>
                             <span className={`font-bold ${isLow ? 'text-red-600' : 'text-gray-800'}`}>
-                                {parseFloat(r.stock_qty).toLocaleString()}<span className="ml-0.5 text-[9px] uppercase text-gray-500">pcs</span>
+                                {parseFloat(r.stock_qty).toLocaleString()}<span className="ml-0.5 text-[9px] uppercase text-gray-500">{r.stock_unit || r.unit_type || 'pcs'}</span>
                             </span>
                         </div>
                         <div className="flex items-center gap-1">
@@ -1101,66 +1093,13 @@ export default function Inventory() {
             render: r => (
                 <div className="flex items-center gap-3 text-[10px]">
                     <div className="flex items-center gap-1">
-                        <span className="text-gray-400 font-bold text-[9px] uppercase">Batch:</span>
-                        <EditableCell value={r.batch_number || '—'} onSave={v => handleInlineUpdate(r.id, 'batch_number', v)} />
-                    </div>
-                    <div className="flex items-center gap-1">
                         <span className="text-gray-400 font-bold text-[9px] uppercase">Aisle:</span>
                         <EditableCell value={r.aisle_location || '—'} onSave={v => handleInlineUpdate(r.id, 'aisle_location', v)} />
                     </div>
                 </div>
             ),
         },
-        {
-            key: 'dates', label: 'Dates',
-            render: r => {
-                const parseDate = (dStr) => {
-                    if (!dStr) return null;
-                    const parts = dStr.slice(0, 10).split('-');
-                    if (parts.length === 3) {
-                        if (parts[2].length === 4) return new Date(parts[2], parts[1] - 1, parts[0]);
-                        if (parts[0].length === 4) return new Date(parts[0], parts[1] - 1, parts[2]);
-                    }
-                    return new Date(dStr);
-                };
-                const expDate = parseDate(r.expiry_date);
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                if (expDate) expDate.setHours(0, 0, 0, 0);
-                const diffTime = expDate ? expDate - today : null;
-                const diffDays = diffTime !== null ? Math.ceil(diffTime / (1000 * 60 * 60 * 24)) : null;
 
-                const isNearExpiry = diffDays !== null && diffDays <= 60;
-                const isExpired = diffDays !== null && diffDays < 0;
-
-                let expColor = "text-gray-700";
-                if (isExpired) {
-                    expColor = "text-rose-700 font-black animate-pulse bg-rose-50 border border-rose-100 rounded px-1.5 py-0.5 shadow-[0_0_8px_rgba(244,63,94,0.4)]";
-                } else if (isNearExpiry) {
-                    expColor = "text-rose-600 font-extrabold animate-pulse bg-rose-50 border border-rose-100 rounded px-1.5 py-0.5 shadow-[0_0_8px_rgba(244,63,94,0.4)]";
-                }
-
-                return (
-                    <div className="flex flex-col gap-1 text-[10px]">
-                        <div className="flex items-center gap-1.5">
-                            <span className="text-gray-400 font-bold text-[9px] uppercase">Exp:</span>
-                            <span className={expColor}>
-                                <EditableCell value={r.expiry_date?.slice(0, 10) || 'SET'} type="date" onSave={v => handleInlineUpdate(r.id, 'expiry_date', v)} />
-                            </span>
-                            {isNearExpiry && (
-                                <span className="text-[8px] font-black text-rose-600 animate-pulse">
-                                    {isExpired ? "🚨 EXP" : `🚨 ${diffDays}d`}
-                                </span>
-                            )}
-                        </div>
-                        <div className="flex items-center gap-1">
-                            <span className="text-gray-400 font-bold text-[9px] uppercase">In:</span>
-                            <span className="text-gray-600 font-medium">{r.last_restocked_at ? new Date(r.last_restocked_at).toLocaleDateString('en-GB') : '—'}</span>
-                        </div>
-                    </div>
-                );
-            }
-        },
         {
             key: 'status', label: 'Active',
             render: r => (
@@ -1389,8 +1328,10 @@ export default function Inventory() {
                         rowClassName={row => {
                             const isExpired = checkIsExpired(row.expiry_date);
                             const isExpiring = checkIsExpiringSoon(row.expiry_date);
+                            const isLow = parseFloat(row.stock_qty || 0) > 0 && parseFloat(row.stock_qty || 0) <= parseFloat(row.low_stock_alert || 10);
                             if (isExpired) return 'bg-red-900 text-white font-semibold border-l-4 border-red-600';
-                            if (isExpiring) return 'bg-rose-50/60 text-rose-900 border-l-4 border-rose-400 font-medium';
+                            if (isExpiring) return 'bg-orange-50 text-orange-950 border-l-4 border-orange-500 font-medium';
+                            if (isLow) return 'bg-red-50 text-red-900 border-l-4 border-red-500 font-semibold';
                             return '';
                         }}
                     />
@@ -1406,8 +1347,10 @@ export default function Inventory() {
                     rowClassName={row => {
                         const isExpired = checkIsExpired(row.expiry_date);
                         const isExpiring = checkIsExpiringSoon(row.expiry_date);
+                        const isLow = parseFloat(row.stock_qty || 0) <= parseFloat(row.low_stock_alert || 0);
                         if (isExpired) return 'bg-red-900 text-white font-semibold border-l-4 border-red-600';
-                        if (isExpiring) return 'bg-rose-50/60 text-rose-900 border-l-4 border-rose-400 font-medium';
+                        if (isExpiring) return 'bg-orange-50 text-orange-950 border-l-4 border-orange-500 font-medium';
+                        if (isLow) return 'bg-red-50 text-red-900 border-l-4 border-red-500 font-semibold';
                         return '';
                     }}
                 />
@@ -1424,10 +1367,27 @@ export default function Inventory() {
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
                             <span className="w-1 h-3 bg-primary-600 rounded-full" />Product Reference
                         </h4>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                            <Input label="Product ID (Mongo) *" value={form.product_id} onChange={e => setF('product_id', e.target.value)} placeholder="64f1a2b3c4d5e6f7a8b9c0d1" />
-                            <Input label="Variant ID *" value={form.variant_id} onChange={e => setF('variant_id', e.target.value)} placeholder="VID-AMUL-500" />
-                        </div>
+                        <AlgoliaProductSearch
+                            mode="variant"
+                            label="Search Catalog Variant *"
+                            value={form.variant_label}
+                            placeholder="Search by brand, product name, or SKU…"
+                            onSelect={(v) => {
+                                setF('product_id', v.productId)
+                                setF('variant_id', v.variantId)
+                                setF('variant_label', v.displayLabel)
+                            }}
+                            onClear={() => {
+                                setF('product_id', '')
+                                setF('variant_id', '')
+                                setF('variant_label', '')
+                            }}
+                        />
+                        {form.product_id && (
+                            <p className="text-[10px] text-gray-400 font-mono">
+                                Product ID: {form.product_id} · Variant ID: {form.variant_id}
+                            </p>
+                        )}
                     </section>
                     <section className="space-y-4">
                         <h4 className="text-[10px] font-extrabold text-primary-600 uppercase tracking-widest flex items-center gap-2">
