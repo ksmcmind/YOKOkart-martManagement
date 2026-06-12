@@ -37,15 +37,16 @@ const RETURN_POLICIES = [
 ]
 
 const SCHEMA_FIELDS = [
-    'product_code', 'name', 'brand_code', 'description', 'category_slug', 'subcategory_slug',
+    'name', 'brand', 'description', 'category_slug', 'subcategory_slug',
     'search_keywords', 'tags', 'is_active', 'is_veg', 'return_policy',
-    'hsn_code', 'gst_percentage',
+    'hsn_code', 'gst_percentage', 'variant_id', 'variant_name',
+    'display_size', 'sku', 'barcode', 'plu_code', 'details', 'images',
+    'variant_is_active',
 ]
 
 const FIELD_VALIDATORS = {
-    product_code: v => v?.trim() ? true : 'Required',
     name: v => v?.trim() ? true : 'Required',
-    brand_code: v => v?.trim() ? true : 'Required',
+    brand: v => v?.trim() ? true : 'Required',
     category_slug: v => v?.trim() ? true : 'Required',
 }
 
@@ -65,9 +66,7 @@ const EMPTY_FILTERS = {
     isActive: '',
     isVeg: '',
     search: '',
-    productId: '',
     page: 1,
-    limit: 50,
 }
 
 const STATUS_OPTIONS = [
@@ -100,16 +99,13 @@ function FilterBar({ draft, setDraft, onSearch, onReset, categories, loading }) 
     const [suggestions, setSuggestions] = useState([])
     const [suggestLoading, setSuggestLoading] = useState(false)
     const [showSuggest, setShowSuggest] = useState(false)
-    // inputValue = what's visible in the search box
-    // draft.search = what gets sent to the API (empty when productId is set)
-    const [inputValue, setInputValue] = useState(draft.search || '')
     const suggestRef = useRef(null)
 
     const set = (k, v) => setDraft(p => ({ ...p, [k]: v }))
 
-    // Debounced autocomplete suggestions on typing (DO NOT search products list)
+    // Debounced autocomplete
     useEffect(() => {
-        const q = inputValue.trim()
+        const q = draft.search?.trim()
         if (!q || q.length < 2) {
             setSuggestions([])
             return
@@ -119,6 +115,7 @@ function FilterBar({ draft, setDraft, onSearch, onReset, categories, loading }) 
             setSuggestLoading(true)
             try {
                 const res = await api.get(`/products/autocomplete?q=${encodeURIComponent(q)}`)
+                console.log('[Autocomplete] Response:', res)
                 if (res.success) {
                     setSuggestions(res.data?.suggestions || [])
                     setShowSuggest(true)
@@ -128,12 +125,12 @@ function FilterBar({ draft, setDraft, onSearch, onReset, categories, loading }) 
             } finally {
                 setSuggestLoading(false)
             }
-        }, 450)
+        }, 400)
 
         return () => clearTimeout(timer)
-    }, [inputValue])
+    }, [draft.search])
 
-    // Close suggestions on click outside
+    // Close on click outside
     useEffect(() => {
         const clickOut = (e) => {
             if (suggestRef.current && !suggestRef.current.contains(e.target)) {
@@ -144,27 +141,11 @@ function FilterBar({ draft, setDraft, onSearch, onReset, categories, loading }) 
         return () => document.removeEventListener('mousedown', clickOut)
     }, [])
 
-    const handleSelectSuggest = (s) => {
-        if (s.is_brand) {
-            // Brand suggestion → filter by brand; clear search + productId
-            setInputValue('')
-            setDraft(prev => ({ ...prev, brand: s.brand || s.name, search: '', productId: '', page: 1 }))
-        } else {
-            // Product suggestion → show name in the input box (so it doesn't blank out)
-            // but send only productId to the API (draft.search stays empty)
-            setInputValue(s.name)
-            setDraft(prev => ({ ...prev, search: '', productId: s.product_id || s.objectID || '', page: 1 }))
-        }
+    const handleSelect = (val) => {
+        set('search', val)
         setShowSuggest(false)
+        // Delay slightly to let state update before committing
         setTimeout(onSearch, 50)
-    }
-
-    const handleInputChange = (e) => {
-        const val = e.target.value
-        setInputValue(val)
-        // Typing again resets productId (new text search via Algolia, not exact ID)
-        setDraft(prev => ({ ...prev, search: val, productId: '' }))
-        setShowSuggest(true)
     }
 
     return (
@@ -175,8 +156,8 @@ function FilterBar({ draft, setDraft, onSearch, onReset, categories, loading }) 
                         type="text"
                         placeholder="Search products by name, code, brand..."
                         className="w-full pl-9 pr-4 py-2 bg-gray-50 border-none rounded-lg text-sm focus:ring-0 focus:outline-none transition-all"
-                        value={inputValue}
-                        onChange={handleInputChange}
+                        value={draft.search}
+                        onChange={e => { set('search', e.target.value); setShowSuggest(true) }}
                         onKeyDown={e => {
                             if (e.key === 'Enter') {
                                 onSearch()
@@ -194,29 +175,31 @@ function FilterBar({ draft, setDraft, onSearch, onReset, categories, loading }) 
                         </div>
                     )}
 
-                    {/* Autocomplete Dropdown */}
-                    {showSuggest && inputValue?.length >= 2 && (
-                        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-gray-100 rounded-xl shadow-xl max-h-60 overflow-y-auto">
+                    {/* Suggestions Dropdown */}
+                    {showSuggest && draft.search.length >= 2 && (
+                        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-gray-100 rounded-xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150 max-h-60 overflow-y-auto">
                             {suggestions.length > 0 ? (
                                 suggestions.map((s, i) => (
                                     <button
                                         key={i}
-                                        onClick={() => handleSelectSuggest(s)}
+                                        onClick={() => handleSelect(s.name)}
                                         className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-primary-50 border-b border-gray-50 last:border-none flex items-center justify-between transition-colors"
                                     >
                                         <div className="flex items-center gap-3">
-                                            <span className="text-sm">{s.is_brand ? '🏷️' : '🔍'}</span>
-                                            <span className="font-semibold truncate max-w-[150px] sm:max-w-[200px]">{s.name}</span>
+                                            <svg className="w-3.5 h-3.5 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                            </svg>
+                                            <span className="font-medium truncate max-w-[150px] sm:max-w-[200px]">{s.name}</span>
                                         </div>
-                                        {s.is_brand ? (
-                                            <span className="text-[9px] font-extrabold text-primary-600 bg-primary-50 px-2 py-0.5 rounded-full uppercase tracking-wider">Brand</span>
-                                        ) : s.brand && (
+                                        {s.brand && (
                                             <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{s.brand}</span>
                                         )}
                                     </button>
                                 ))
                             ) : !suggestLoading ? (
-                                <div className="px-4 py-3 text-xs text-gray-400 italic">No products matched search</div>
+                                <div className="px-4 py-3 text-xs text-gray-400 italic bg-gray-50/50">
+                                    No products found for "{draft.search}"
+                                </div>
                             ) : null}
                         </div>
                     )}
@@ -230,31 +213,29 @@ function FilterBar({ draft, setDraft, onSearch, onReset, categories, loading }) 
                         </svg>
                         Filters
                     </Button>
-                    <Button variant="primary" size="sm" onClick={() => { onSearch(); setShowSuggest(false); }} loading={loading}>Search</Button>
+                    <Button variant="primary" size="sm" onClick={onSearch} loading={loading}>Search</Button>
                 </div>
             </div>
 
             {expanded && (
                 <div className="px-3 pb-4 pt-1 border-t border-gray-50 bg-gray-50/30 grid grid-cols-1 md:grid-cols-4 gap-4 animate-in fade-in slide-in-from-top-2 duration-200">
-                    {/* Category filters commented out as requested
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Category</label>
-            <Select value={draft.categorySlug} onChange={e => { set('categorySlug', e.target.value); set('subcategorySlug', '') }} className="bg-white border-gray-200">
-              <option value="">All Categories</option>
-              {categories.map(c => <option key={c.slug} value={c.slug}>{c.name}</option>)}
-            </Select>
-          </div>
+                    <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Category</label>
+                        <Select value={draft.categorySlug} onChange={e => { set('categorySlug', e.target.value); set('subcategorySlug', '') }} className="bg-white border-gray-200">
+                            <option value="">All Categories</option>
+                            {categories.map(c => <option key={c.slug} value={c.slug}>{c.name}</option>)}
+                        </Select>
+                    </div>
 
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Subcategory</label>
-            <Select value={draft.subcategorySlug} onChange={e => set('subcategorySlug', e.target.value)} disabled={!draft.categorySlug} className="bg-white border-gray-200">
-              <option value="">All Subcategories</option>
-              {categories.find(c => c.slug === draft.categorySlug)?.subcategories.map(s => (
-                <option key={s.slug} value={s.slug}>{s.name}</option>
-              ))}
-            </Select>
-          </div>
-          */}
+                    <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Subcategory</label>
+                        <Select value={draft.subcategorySlug} onChange={e => set('subcategorySlug', e.target.value)} disabled={!draft.categorySlug} className="bg-white border-gray-200">
+                            <option value="">All Subcategories</option>
+                            {categories.find(c => c.slug === draft.categorySlug)?.subcategories.map(s => (
+                                <option key={s.slug} value={s.slug}>{s.name}</option>
+                            ))}
+                        </Select>
+                    </div>
 
                     <div className="space-y-1.5">
                         <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Brand</label>
@@ -375,7 +356,7 @@ function VariantEditor({ variants, onChange, isEdit }) {
 
 export default function Products() {
     const dispatch = useDispatch()
-    const { user, isSuperAdmin } = useAuth()
+    const { user, isSuperAdmin, martId } = useAuth()
     const categories = useSelector(selectAllCategories)
     const loading = useSelector(selectProductLoading)
     const saving = useSelector(selectProductSaving)
@@ -406,8 +387,10 @@ export default function Products() {
     // If the last request failed (e.g. rate limit), stop retrying automatically.
     // Error is cleared when the user actively changes a filter so they can try again.
     useEffect(() => {
-        dispatch(fetchProducts(committedFilters))
-    }, [dispatch, committedFilters])
+        // If no martId and user is NOT a super admin, block the fetch
+        if (!martId && !isSuperAdmin) return 
+        dispatch(fetchProducts({ ...committedFilters, martId: martId || null }))
+    }, [dispatch, committedFilters, martId, isSuperAdmin])
 
     const handleSearch = () => setCommittedFilters({ ...draftFilters, page: 1 })
     const handleReset = () => {
@@ -501,7 +484,7 @@ export default function Products() {
                 </div>
             )
         },
-    ].filter(col => !isSuperAdmin || col.key !== 'actions')
+    ]
 
     const renderExpanded = (r) => (
         <div className="overflow-hidden rounded-lg border border-gray-100 bg-white shadow-sm">
@@ -535,15 +518,29 @@ export default function Products() {
     )
 
     const groupRowsToProducts = (rows) => {
-        return rows.map(r => ({
-            ...r,
-            is_active: r.is_active?.toLowerCase() !== 'false',
-            is_veg: r.is_veg?.toLowerCase() !== 'false',
-            gst_percentage: parseFloat(r.gst_percentage || 0),
-            search_keywords: r.search_keywords?.split('|').map(t => t.trim()).filter(Boolean) || [],
-            tags: r.tags?.split('|').map(t => t.trim()).filter(Boolean) || [],
-            variants: [],
-        }))
+        const map = new Map()
+        rows.forEach(r => {
+            const key = `${r.name?.trim().toLowerCase()}::${r.brand?.trim().toLowerCase()}`
+            if (!map.has(key)) {
+                map.set(key, {
+                    ...r,
+                    is_active: r.is_active?.toLowerCase() === 'true',
+                    is_veg: r.is_veg?.toLowerCase() === 'true',
+                    gst_percentage: parseFloat(r.gst_percentage || 0),
+                    search_keywords: r.search_keywords?.split('|').map(t => t.trim()).filter(Boolean) || [],
+                    tags: r.tags?.split('|').map(t => t.trim()).filter(Boolean) || [],
+                    variants: [],
+                })
+            }
+            map.get(key).variants.push({
+                variant_id: r.variant_id, variant_name: r.variant_name, display_size: r.display_size,
+                sku: r.sku, barcode: r.barcode, plu_code: r.plu_code,
+                details: r.details || '{}',
+                images: r.images?.split('|').map(u => u.trim()).filter(Boolean) || [],
+                is_active: r.variant_is_active?.toLowerCase() === 'true',
+            })
+        })
+        return [...map.values()]
     }
 
     const activeChips = getActiveChips(committedFilters, categories)
@@ -553,7 +550,7 @@ export default function Products() {
             <PageHeader
                 title="Products"
                 subtitle="Manage global product catalog"
-                action={(user?.role === 'admin') && (
+                action={(isSuperAdmin || user?.role === 'admin') && (
                     <div className="flex gap-2">
                         <Button variant="secondary" onClick={() => setBulkOpen(true)}>Bulk Upload</Button>
                         <Button variant="primary" onClick={() => { setForm(EMPTY_FORM); setIsEdit(false); setAddOpen(true) }}>+ Add Product</Button>
@@ -682,7 +679,7 @@ export default function Products() {
                     return action.payload;
                 }}
                 groupRows={groupRowsToProducts}
-                onDone={() => dispatch(fetchProducts(committedFilters))}
+                onDone={() => dispatch(fetchProducts({ categorySlug, subcategorySlug, search, martId: martId || null }))}
             />
         </div>
     )
