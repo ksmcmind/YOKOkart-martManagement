@@ -9,6 +9,7 @@ import productReducer from './slices/productSlice'
 import orderReducer from './slices/orderSlice'
 import inventoryReducer from './slices/inventorySlice'
 import driverReducer from './slices/driverSlice'
+import transferReducer from './slices/transferSlice'
 
 const store = configureStore({
     reducer: {
@@ -21,6 +22,7 @@ const store = configureStore({
         order: orderReducer,
         inventory: inventoryReducer,
         drivers: driverReducer,
+        transfers: transferReducer,
     },
 })
 

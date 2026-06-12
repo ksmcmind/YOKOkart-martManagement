@@ -15,8 +15,15 @@ import { showToast } from './uiSlice'
 
 export const fetchProducts = createAsyncThunk(
   'product/fetchAll',
-  async ({ martId = null, categorySlug = null, subcategorySlug = null, search = '', code = '', brand = '', isActive = '', isVeg = '', page = 1, limit = 50 } = {}, { rejectWithValue }) => {
+  async (filters = {}, { getState, rejectWithValue }) => {
     try {
+      const filterKey = JSON.stringify(filters)
+      const cached = getState().product?.cache?.[filterKey]
+      if (cached) {
+        return cached
+      }
+
+      const { martId = null, categorySlug = null, subcategorySlug = null, search = '', code = '', brand = '', isActive = '', isVeg = '', page = 1, limit = 50 } = filters;
       const qs = new URLSearchParams()
       if (martId) qs.set('martId', martId)
       if (categorySlug) qs.set('categorySlug', categorySlug)
@@ -113,6 +120,7 @@ const initialState = {
   saving: false,
   bulkUploading: false,
   bulkStatus: null, // { total, done, success, failed }
+  cache: {}, // keyed by JSON stringified filters
 }
 
 const productSlice = createSlice({
@@ -122,15 +130,21 @@ const productSlice = createSlice({
     clearProductError: (state) => { state.error = null },
     setBulkStatus: (state, action) => { state.bulkStatus = action.payload },
     clearBulkStatus: (state) => { state.bulkStatus = null },
-    clearProducts: (state) => { state.list = []; state.pagination = null },
+    clearProducts: (state) => { state.list = []; state.pagination = null; state.cache = {}; },
   },
   extraReducers: (builder) => {
     builder
       .addCase(fetchProducts.pending, (state) => { state.loading = true; state.error = null })
       .addCase(fetchProducts.fulfilled, (state, action) => {
         state.loading = false
-        state.list = action.payload?.products || action.payload || []
-        state.pagination = action.payload?.pagination || null
+        const data = action.payload?.products || action.payload || []
+        const pagination = action.payload?.pagination || null
+        state.list = data
+        state.pagination = pagination
+        
+        // Cache the result
+        const filterKey = action.meta.arg ? JSON.stringify(action.meta.arg) : '{}'
+        state.cache[filterKey] = { products: data, pagination }
       })
       .addCase(fetchProducts.rejected, (state, action) => {
         state.loading = false

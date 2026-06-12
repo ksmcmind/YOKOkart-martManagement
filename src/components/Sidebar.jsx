@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import { useDispatch, useSelector } from 'react-redux'
 import { logout } from '../store/slices/authSlice'
 import { selectUser } from '../store/slices/authSlice'
+import useAuth from '../hooks/useAuth'
+import { fetchMartById } from '../store/slices/martSlice'
 
 const NAV = [
     { to: '/', label: 'Dashboard', icon: '📊' },
@@ -10,6 +12,7 @@ const NAV = [
     { to: '/staff', label: 'Staff', icon: '👥' },
     { to: '/categories', label: 'Categories', icon: '🗂️' },
     { to: '/products', label: 'Products', icon: '🛍️' },
+    { to: '/variants', label: 'Variants', icon: '🏷️' },
     { to: '/orders', label: 'Orders', icon: '📦' },
     { to: '/inventory', label: 'Inventory', icon: '📋' },
     { to: '/transfers', label: 'Received Goods', icon: '🚚' },
@@ -20,7 +23,17 @@ const NAV = [
 export default function Sidebar() {
     const dispatch = useDispatch()
     const user = useSelector(selectUser)
+    const { martId } = useAuth()
+    const activeMart = useSelector(state => state.mart.selected)
     const [collapsed, setCollapsed] = useState(false)
+
+    useEffect(() => {
+        if (martId && !activeMart) {
+            dispatch(fetchMartById(martId))
+        }
+    }, [martId, activeMart, dispatch])
+
+    const martInitial = activeMart?.name ? activeMart.name.charAt(0).toUpperCase() : 'M'
 
     return (
         <aside className={`${collapsed ? 'w-20' : 'w-60'} bg-white border-r border-gray-100 flex flex-col h-screen sticky top-0 transition-all duration-300 z-50`}>
@@ -28,10 +41,10 @@ export default function Sidebar() {
             <div className="p-4 h-16 border-b border-gray-50 flex items-center justify-between overflow-hidden">
                 {!collapsed && (
                     <div className="flex items-center gap-2 animate-in fade-in duration-300">
-                        <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center text-white font-bold text-sm shadow-sm">K</div>
-                        <div>
-                            <div className="font-bold text-gray-900 text-xs tracking-tight">KSMCM</div>
-                            <div className="text-[10px] text-gray-400 font-medium">SUPER ADMIN</div>
+                        <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center text-white font-bold text-sm shadow-sm">{martInitial}</div>
+                        <div className="min-w-0">
+                            <div className="font-bold text-gray-900 text-xs tracking-tight truncate w-32" title={activeMart?.name || 'Loading...'}>{activeMart?.name || 'Loading...'}</div>
+                            <div className="text-[10px] text-gray-400 font-medium truncate w-32" title={activeMart?.address || 'Mart Details'}>{activeMart?.address || 'Mart Details'}</div>
                         </div>
                     </div>
                 )}

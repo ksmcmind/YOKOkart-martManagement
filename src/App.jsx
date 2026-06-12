@@ -17,6 +17,7 @@ import Drivers from './pages/Drivers'
 import BulkUpload from './pages/BulkUpload'
 import Returns from './pages/Returns'
 import Transfers from './pages/Transfers'
+import Variants from './pages/Variants'
 
 function Protected({ children }) {
     const { isLoggedIn } = useSelector(selectAuth)
@@ -52,6 +53,7 @@ export default function App() {
             <Route path="/staff" element={<Protected><Staff /></Protected>} />
             <Route path="/categories" element={<Protected><Categories /></Protected>} />
             <Route path="/products" element={<Protected><Products /></Protected>} />
+            <Route path="/variants" element={<Protected><Variants /></Protected>} />
             <Route path="/orders" element={<Protected><Orders /></Protected>} />
             <Route path="/inventory" element={<Protected><Inventory /></Protected>} />
             <Route path="/transfers" element={<Protected><Transfers /></Protected>} />

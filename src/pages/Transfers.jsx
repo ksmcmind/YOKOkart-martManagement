@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { useDispatch } from 'react-redux'
+import { useDispatch, useSelector } from 'react-redux'
 import api from '../api/index'
 import { showToast } from '../store/slices/uiSlice'
 import PageHeader from '../components/PageHeader'
@@ -10,24 +10,44 @@ import Badge from '../components/Badge'
 import Input from '../components/Input'
 import useAuth from '../hooks/useAuth'
 import AlgoliaProductSearch from '../components/AlgoliaProductSearch'
+import {
+  fetchTransfers,
+  createTransferRequest,
+  cancelTransferRequest,
+  receiveTransferCargo,
+  fetchReturns,
+  fetchReturnBatches,
+  createReturnRequest,
+  cancelReturnRequest,
+  dispatchReturnCargo
+} from '../store/slices/transferSlice'
+import { fetchMartById } from '../store/slices/martSlice'
 
 export default function Transfers() {
   const dispatch = useDispatch()
-  const { martId, staffId } = useAuth()
+  const { martId } = useAuth()
 
-  const [transfers, setTransfers] = useState([])
-  const [loading, setLoading] = useState(false)
+  // Selectors from Redux Store
+  const {
+    transfers,
+    returns,
+    returnBatches,
+    loading,
+    returnsLoading,
+    submitting
+  } = useSelector(state => state.transfers)
+
+  const activeMart = useSelector(state => state.mart.selected)
+  const associatedWarehouseId = activeMart?.warehouse_id || ''
+
   const [receiveOpen, setReceiveOpen] = useState(false)
   const [selectedTransfer, setSelectedTransfer] = useState(null)
-  const [submitting, setSubmitting] = useState(false)
   const [receiveForm, setReceiveForm] = useState({ qtyReceived: '' })
   const [statusFilter, setStatusFilter] = useState('all')
 
   // Request Stock states
   const [requestOpen, setRequestOpen] = useState(false)
   const [warehouses, setWarehouses] = useState([])
-  const [products, setProducts] = useState([])
-  const [associatedWarehouseId, setAssociatedWarehouseId] = useState('')
   const [requestForm, setRequestForm] = useState({
     warehouseId: '',
     productId: '',
@@ -42,14 +62,11 @@ export default function Transfers() {
 
   // Returns state
   const [activeTab, setActiveTab] = useState('transfers') // 'transfers' | 'returns'
-  const [returns, setReturns] = useState([])
   const [returnOpen, setReturnOpen] = useState(false)
-  const [returnBatches, setReturnBatches] = useState([])
   const [selectedReturnBatch, setSelectedReturnBatch] = useState(null)
   const [batchSearchText, setBatchSearchText] = useState('')
   const [batchDropdownOpen, setBatchDropdownOpen] = useState(false)
   const [returnForm, setReturnForm] = useState({ qty: '', reason: '', notes: '' })
-  const [returnsLoading, setReturnsLoading] = useState(false)
 
   const formatDateDisplay = (dateStr) => {
     if (!dateStr) return '—'
@@ -62,66 +79,43 @@ export default function Transfers() {
     }
   }
 
-  const fetchTransfers = useCallback(async () => {
-    if (!martId) return
-    setLoading(true)
-    try {
-      const res = await api.get(`/warehouse-transfers/mart/${martId}`)
-      if (res.success) {
-        // Keep all transfers including 'created' status (requested transfers)
-        setTransfers(res.data || [])
-      }
-    } catch (err) {
-      console.error(err)
-      dispatch(showToast({ message: 'Failed to retrieve transfers list', type: 'error' }))
-    } finally {
-      setLoading(false)
+  const loadTransfers = useCallback(() => {
+    if (martId) {
+      dispatch(fetchTransfers(martId))
     }
   }, [martId, dispatch])
 
-  const fetchReturns = useCallback(async () => {
-    if (!martId) return
-    setReturnsLoading(true)
-    try {
-      const res = await api.get(`/mart-returns/mart/${martId}`)
-      if (res.success) {
-        setReturns(res.data || [])
-      }
-    } catch (err) {
-      console.error(err)
-      dispatch(showToast({ message: 'Failed to retrieve returns list', type: 'error' }))
-    } finally {
-      setReturnsLoading(false)
+  const loadReturns = useCallback(() => {
+    if (martId) {
+      dispatch(fetchReturns(martId))
     }
   }, [martId, dispatch])
 
-  const fetchReturnBatches = useCallback(async () => {
-    if (!martId) return
-    try {
-      const res = await api.get(`/mart-returns/mart/${martId}/batches`)
-      if (res.success) {
-        setReturnBatches(res.data || [])
-      }
-    } catch (err) {
-      console.error(err)
+  const loadReturnBatches = useCallback(() => {
+    if (martId) {
+      dispatch(fetchReturnBatches(martId))
     }
-  }, [martId])
+  }, [martId, dispatch])
 
   const handleCancelReturn = async (returnId) => {
     if (!window.confirm('Are you sure you want to cancel this return request?')) return
-    setSubmitting(true)
-    try {
-      const res = await api.patch(`/mart-returns/${returnId}/cancel`)
-      if (res.success) {
-        dispatch(showToast({ message: 'Return request cancelled successfully', type: 'success' }))
-        fetchReturns()
-      } else {
-        dispatch(showToast({ message: res.message || 'Cancellation failed', type: 'error' }))
-      }
-    } catch (err) {
-      dispatch(showToast({ message: 'Failed to cancel return request', type: 'error' }))
-    } finally {
-      setSubmitting(false)
+    const result = await dispatch(cancelReturnRequest(returnId))
+    if (cancelReturnRequest.fulfilled.match(result)) {
+      dispatch(showToast({ message: 'Return request cancelled successfully', type: 'success' }))
+      loadReturns()
+    } else {
+      dispatch(showToast({ message: result.payload || 'Cancellation failed', type: 'error' }))
+    }
+  }
+
+  const handleDispatchReturn = async (returnId) => {
+    if (!window.confirm('Are you sure you want to dispatch this return cargo?')) return
+    const result = await dispatch(dispatchReturnCargo(returnId))
+    if (dispatchReturnCargo.fulfilled.match(result)) {
+      dispatch(showToast({ message: 'Return cargo dispatched successfully!', type: 'success' }))
+      loadReturns()
+    } else {
+      dispatch(showToast({ message: result.payload || 'Dispatch failed', type: 'error' }))
     }
   }
 
@@ -145,45 +139,32 @@ export default function Transfers() {
       return
     }
 
-    setSubmitting(true)
-    try {
-      const res = await api.post(`/mart-returns/mart/${martId}`, {
-        martBatchId: selectedReturnBatch.id,
-        qty: qtyNum,
-        reason,
-        notes
-      })
-      if (res.success) {
-        dispatch(showToast({ message: 'Return request submitted successfully!', type: 'success' }))
-        setReturnOpen(false)
-        setReturnForm({ qty: '', reason: '', notes: '' })
-        setSelectedReturnBatch(null)
-        setBatchSearchText('')
-        fetchReturns()
-      } else {
-        dispatch(showToast({ message: res.message || 'Return request failed', type: 'error' }))
-      }
-    } catch (err) {
-      dispatch(showToast({ message: err?.response?.data?.message || err?.message || 'Failed to submit return request', type: 'error' }))
-    } finally {
-      setSubmitting(false)
+    const result = await dispatch(createReturnRequest({
+      martId,
+      martBatchId: selectedReturnBatch.id,
+      qty: qtyNum,
+      reason,
+      notes
+    }))
+    if (createReturnRequest.fulfilled.match(result)) {
+      dispatch(showToast({ message: 'Return request submitted successfully!', type: 'success' }))
+      setReturnOpen(false)
+      setReturnForm({ qty: '', reason: '', notes: '' })
+      setSelectedReturnBatch(null)
+      setBatchSearchText('')
+      loadReturns()
+    } else {
+      dispatch(showToast({ message: result.payload || 'Return request failed', type: 'error' }))
     }
   }
 
   useEffect(() => {
-    fetchTransfers()
-    fetchReturns()
+    loadTransfers()
+    loadReturns()
 
-    // Fetch mart details to resolve associated warehouse
+    // Fetch mart details via Redux
     if (martId) {
-      api.get(`/marts/${martId}`)
-        .then(res => {
-          if (res.success && res.data?.warehouse_id) {
-            setAssociatedWarehouseId(res.data.warehouse_id)
-            setRequestForm(prev => ({ ...prev, warehouseId: res.data.warehouse_id }))
-          }
-        })
-        .catch(console.error)
+      dispatch(fetchMartById(martId))
     }
 
     // Fetch warehouses for dropdown
@@ -192,7 +173,14 @@ export default function Transfers() {
         if (res.success) setWarehouses(res.data || [])
       })
       .catch(console.error)
-  }, [martId, fetchTransfers, fetchReturns])
+  }, [martId, dispatch, loadTransfers, loadReturns])
+
+  // Reset/Set default warehouseId in request form when associatedWarehouseId changes
+  useEffect(() => {
+    if (associatedWarehouseId) {
+      setRequestForm(prev => ({ ...prev, warehouseId: associatedWarehouseId }))
+    }
+  }, [associatedWarehouseId])
 
   // Reset product selection when warehouseId changes
   useEffect(() => {
@@ -250,40 +238,27 @@ export default function Transfers() {
       return
     }
 
-    setSubmitting(true)
-    try {
-      const res = await api.patch(`/warehouse-transfers/${selectedTransfer.transfer_id}/receive`, {
-        qtyReceived: qty
-      })
-      if (res.success) {
-        dispatch(showToast({ message: 'Restock completed! Mart inventory levels updated.', type: 'success' }))
-        setReceiveOpen(false)
-        fetchTransfers()
-      } else {
-        dispatch(showToast({ message: res.message || 'Confirmation failed', type: 'error' }))
-      }
-    } catch (err) {
-      dispatch(showToast({ message: 'Failed to complete inbound confirmation', type: 'error' }))
-    } finally {
-      setSubmitting(false)
+    const result = await dispatch(receiveTransferCargo({
+      transferId: selectedTransfer.transfer_id,
+      qtyReceived: qty
+    }))
+    if (receiveTransferCargo.fulfilled.match(result)) {
+      dispatch(showToast({ message: 'Restock completed! Mart inventory levels updated.', type: 'success' }))
+      setReceiveOpen(false)
+      loadTransfers()
+    } else {
+      dispatch(showToast({ message: result.payload || 'Confirmation failed', type: 'error' }))
     }
   }
 
   const handleCancelRequest = async (transferId) => {
     if (!window.confirm('Are you sure you want to cancel this stock request?')) return
-    setSubmitting(true)
-    try {
-      const res = await api.patch(`/warehouse-transfers/${transferId}/cancel`)
-      if (res.success) {
-        dispatch(showToast({ message: 'Stock request cancelled successfully', type: 'success' }))
-        fetchTransfers()
-      } else {
-        dispatch(showToast({ message: res.message || 'Cancellation failed', type: 'error' }))
-      }
-    } catch (err) {
-      dispatch(showToast({ message: 'Failed to cancel stock request', type: 'error' }))
-    } finally {
-      setSubmitting(false)
+    const result = await dispatch(cancelTransferRequest(transferId))
+    if (cancelTransferRequest.fulfilled.match(result)) {
+      dispatch(showToast({ message: 'Stock request cancelled successfully', type: 'success' }))
+      loadTransfers()
+    } else {
+      dispatch(showToast({ message: result.payload || 'Cancellation failed', type: 'error' }))
     }
   }
 
@@ -303,30 +278,23 @@ export default function Transfers() {
       return
     }
 
-    setSubmitting(true)
-    try {
-      const res = await api.post('/warehouse-transfers', {
-        warehouseId,
-        martId,
-        productId,
-        variantId,
-        qtyDispatched: qty,
-        notes
-      })
-      if (res.success) {
-        dispatch(showToast({ message: 'Stock request submitted successfully!', type: 'success' }))
-        setRequestOpen(false)
-        setRequestForm({ warehouseId: associatedWarehouseId, productId: '', variantId: '', qtyRequested: '', notes: '' })
-        setSelectedProductLabel('')
-        setSelectedProductVariants([])
-        fetchTransfers()
-      } else {
-        dispatch(showToast({ message: res.message || 'Request failed', type: 'error' }))
-      }
-    } catch (err) {
-      dispatch(showToast({ message: err?.response?.data?.message || err?.message || 'Failed to submit stock request', type: 'error' }))
-    } finally {
-      setSubmitting(false)
+    const result = await dispatch(createTransferRequest({
+      warehouseId,
+      martId,
+      productId,
+      variantId,
+      qtyDispatched: qty,
+      notes
+    }))
+    if (createTransferRequest.fulfilled.match(result)) {
+      dispatch(showToast({ message: 'Stock request submitted successfully!', type: 'success' }))
+      setRequestOpen(false)
+      setRequestForm({ warehouseId: associatedWarehouseId, productId: '', variantId: '', qtyRequested: '', notes: '' })
+      setSelectedProductLabel('')
+      setSelectedProductVariants([])
+      loadTransfers()
+    } else {
+      dispatch(showToast({ message: result.payload || 'Request failed', type: 'error' }))
     }
   }
 
@@ -483,7 +451,9 @@ export default function Transfers() {
       render: (row) => {
         let badgeCol = 'gray'
         if (row.status === 'requested') badgeCol = 'yellow'
-        if (row.status === 'accepted') badgeCol = 'green'
+        if (row.status === 'approved') badgeCol = 'blue'
+        if (row.status === 'dispatched') badgeCol = 'indigo'
+        if (row.status === 'received' || row.status === 'accepted') badgeCol = 'green'
         if (row.status === 'rejected') badgeCol = 'red'
         if (row.status === 'cancelled') badgeCol = 'gray'
         return <Badge variant={badgeCol}>{row.status.toUpperCase()}</Badge>
@@ -518,6 +488,17 @@ export default function Transfers() {
               ✕ Cancel Return
             </Button>
           )}
+          {row.status === 'approved' && (
+            <Button
+              variant="primary"
+              size="sm"
+              className="bg-indigo-600 hover:bg-indigo-700"
+              disabled={submitting}
+              onClick={() => handleDispatchReturn(row.return_id)}
+            >
+              🚚 Dispatch Cargo
+            </Button>
+          )}
         </div>
       )
     }
@@ -537,10 +518,25 @@ export default function Transfers() {
     <div className="space-y-6">
       <PageHeader
         title={activeTab === 'transfers' ? "Received Goods" : "Stock Returns"}
-        subtitle={activeTab === 'transfers' ? "Verify and check-in stock transfer dispatches arriving from warehouse facilities." : "Create and manage returns of damaged, expired or near-expiry stock back to the warehouse."}
+        subtitle={
+          <div className="space-y-2">
+            <p className="text-slate-500 text-sm font-medium">
+              {activeTab === 'transfers' 
+                ? "Verify and check-in stock transfer dispatches arriving from warehouse facilities." 
+                : "Create and manage returns of damaged, expired or near-expiry stock back to the warehouse."}
+            </p>
+            {activeMart && (
+              <div className="inline-flex items-center gap-2 bg-indigo-50/50 border border-indigo-100/80 rounded-xl px-3.5 py-1.5 text-xs text-indigo-700 font-bold shadow-sm">
+                <span>🏪 Active Mart: <strong>{activeMart.name} ({activeMart.code})</strong></span>
+                <span className="text-indigo-200">|</span>
+                <span>📍 {activeMart.address}</span>
+              </div>
+            )}
+          </div>
+        }
         action={
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={activeTab === 'transfers' ? fetchTransfers : fetchReturns}>↻ Refresh</Button>
+            <Button variant="secondary" onClick={activeTab === 'transfers' ? loadTransfers : loadReturns}>↻ Refresh</Button>
             {activeTab === 'transfers' ? (
               <Button variant="primary" className="bg-indigo-600 hover:bg-indigo-700" onClick={() => {
                 setRequestForm({
@@ -556,7 +552,7 @@ export default function Transfers() {
               }}>+ Request Stock</Button>
             ) : (
               <Button variant="primary" className="bg-rose-600 hover:bg-rose-700" onClick={() => {
-                fetchReturnBatches();
+                loadReturnBatches();
                 setReturnForm({
                   qty: '',
                   reason: '',
