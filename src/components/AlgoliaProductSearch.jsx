@@ -1,5 +1,21 @@
 /**
  * AlgoliaProductSearch — reusable Algolia-powered autocomplete for Products / Variants.
+ *
+ * Props:
+ *   mode        – 'variant' (default) | 'product'
+ *                  'variant' → flattens hits into variant-level suggestions and calls
+ *                              onSelect({ variantId, variantName, sku, productName, brandName,
+ *                                         productId, productCode, stockUnit, displayLabel })
+ *                  'product' → returns product-level suggestions and calls
+ *                              onSelect({ productId, productCode, productName, brandName, variants[] })
+ *
+ *   value       – currently selected display label (shown when input is blurred)
+ *   placeholder – input placeholder text
+ *   onSelect    – callback fired when user picks a suggestion
+ *   onClear     – optional callback fired when user clears the selection
+ *   className   – extra className for the wrapper div
+ *   label       – optional field label rendered above input
+ *   disabled    – disable the input
  */
 
 import { useState, useEffect, useRef } from 'react'
@@ -24,7 +40,7 @@ async function algoliaSearch(query) {
 }
 
 export default function AlgoliaProductSearch({
-  mode = 'variant', // 'variant' | 'product'
+  mode = 'variant',
   value = '',
   placeholder,
   onSelect,
@@ -63,34 +79,35 @@ export default function AlgoliaProductSearch({
         const hits = await algoliaSearch(q)
         if (mode === 'variant') {
           const items = []
-          const qWords = q.toLowerCase().split(/\s+/).filter(Boolean)
+          const qLower = q.toLowerCase()
           hits.forEach(prod => {
             const brand = prod.brand || 'Generic'
-            ;(prod.variants || []).forEach(v => {
-              const label = `[${brand}] ${prod.name} — ${v.variant_name || v.sku}`
-              const matchesAllWords = qWords.every(word =>
-                brand.toLowerCase().includes(word) ||
-                prod.name.toLowerCase().includes(word) ||
-                (v.variant_name || '').toLowerCase().includes(word) ||
-                (v.sku || '').toLowerCase().includes(word)
-              )
-              if (matchesAllWords) {
-                items.push({
-                  variantId: v.variant_id || v.variantId || prod.objectID || prod.product_id,
-                  variantName: v.variant_name,
-                  sku: v.sku,
-                  productName: prod.name,
-                  brandName: brand,
-                  productId: prod.objectID || prod.product_id,
-                  productCode: prod.product_code,
-                  stockUnit: v.stock_unit || 'pcs',
-                  displayLabel: label,
-                })
-              }
-            })
+              ; (prod.variants || []).forEach(v => {
+                const label = `[${brand}] ${prod.name} — ${v.variant_name || v.sku}`
+                // local filter so off-topic variants don't show
+                if (
+                  brand.toLowerCase().includes(qLower) ||
+                  prod.name.toLowerCase().includes(qLower) ||
+                  (v.variant_name || '').toLowerCase().includes(qLower) ||
+                  (v.sku || '').toLowerCase().includes(qLower)
+                ) {
+                  items.push({
+                    variantId: v.variant_id || v.variantId || prod.objectID || prod.product_id,
+                    variantName: v.variant_name,
+                    sku: v.sku,
+                    productName: prod.name,
+                    brandName: brand,
+                    productId: prod.objectID || prod.product_id,
+                    productCode: prod.product_code,
+                    stockUnit: v.stock_unit || 'pcs',
+                    displayLabel: label,
+                  })
+                }
+              })
           })
           setSuggestions(items.slice(0, 30))
         } else {
+          // product mode
           setSuggestions(hits.map(prod => ({
             productId: prod.product_id || prod.objectID,
             productCode: prod.product_code,
@@ -137,7 +154,7 @@ export default function AlgoliaProductSearch({
           value={inputVal}
           onChange={e => { setInputVal(e.target.value); setOpen(true) }}
           onFocus={() => { setInputVal(''); setOpen(suggestions.length > 0) }}
-          className="w-full text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-xl pl-9 pr-8 py-2.5 focus:border-indigo-500 focus:outline-none transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-xl pl-9 pr-8 py-2.5 focus:border-primary-500 focus:outline-none transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         />
 
         {/* Search icon */}
@@ -148,7 +165,7 @@ export default function AlgoliaProductSearch({
         {/* Spinner / Clear */}
         <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
           {loading && (
-            <div className="w-3.5 h-3.5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+            <div className="w-3 h-3 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
           )}
           {(value || inputVal) && !loading && (
             <button
@@ -160,9 +177,9 @@ export default function AlgoliaProductSearch({
         </div>
       </div>
 
-      {/* Selected badge */}
+      {/* Currently selected badge */}
       {value && !inputVal && (
-        <div className="mt-1.5 inline-flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-bold px-2.5 py-1 rounded-full max-w-full truncate">
+        <div className="mt-1.5 inline-flex items-center gap-1.5 bg-primary-50 border border-primary-200 text-primary-700 text-[10px] font-bold px-2.5 py-1 rounded-full max-w-full truncate">
           ✔ {value}
         </div>
       )}
@@ -178,10 +195,10 @@ export default function AlgoliaProductSearch({
                 key={`${s.variantId}-${i}`}
                 type="button"
                 onMouseDown={e => { e.preventDefault(); handleSelect(s) }}
-                className="w-full text-left px-3.5 py-2.5 text-xs hover:bg-slate-50 border-b border-slate-50 last:border-none transition-colors flex items-start justify-between gap-2 group"
+                className="w-full text-left px-3.5 py-2.5 text-xs hover:bg-primary-50 border-b border-slate-50 last:border-none transition-colors flex items-start justify-between gap-2 group"
               >
                 <div className="min-w-0">
-                  <p className="font-bold text-slate-800 truncate group-hover:text-indigo-700">{s.productName}</p>
+                  <p className="font-bold text-slate-800 truncate group-hover:text-primary-700">{s.productName}</p>
                   <p className="text-[10px] text-slate-500 mt-0.5 font-mono truncate">{s.variantName || s.sku} · SKU: {s.sku}</p>
                 </div>
                 <span className="shrink-0 text-[9px] font-extrabold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full uppercase tracking-wide mt-0.5">
@@ -195,11 +212,11 @@ export default function AlgoliaProductSearch({
                 key={`${s.productId}-${i}`}
                 type="button"
                 onMouseDown={e => { e.preventDefault(); handleSelect(s) }}
-                className="w-full text-left px-3.5 py-2.5 text-xs hover:bg-slate-50 border-b border-slate-50 last:border-none transition-colors flex items-start justify-between gap-2 group"
+                className="w-full text-left px-3.5 py-2.5 text-xs hover:bg-primary-50 border-b border-slate-50 last:border-none transition-colors flex items-start justify-between gap-2 group"
               >
                 <div className="min-w-0">
-                  <p className="font-bold text-slate-800 truncate group-hover:text-indigo-700">{s.productName}</p>
-                  <p className="text-[10px] text-slate-500 mt-0.5 font-mono">{s.productCode} · {s.variants.length} variant(s)</p>
+                  <p className="font-bold text-slate-800 truncate group-hover:text-primary-700">{s.productName}</p>
+                  <p className="text-[10px] text-slate-500 mt-0.5 font-mono">{s.productCode} · {s.variants.length} variants</p>
                 </div>
                 <span className="shrink-0 text-[9px] font-extrabold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full uppercase tracking-wide mt-0.5">
                   {s.brandName}

@@ -26,7 +26,9 @@ import {
     selectFilteredPagination,
     selectInventorySummary,
     selectInventorySummaryLoading,
-} from '../store/slices/inventorySlice'
+    fetchMartBatches,
+    fetchItemTransactionsFiltered,
+} from '../store/slices/Inventoryslice'
 import { showToast } from '../store/slices/uiSlice'
 import PageHeader from '../components/PageHeader'
 import Button from '../components/Button'
@@ -36,8 +38,11 @@ import Badge from '../components/Badge'
 import Input, { Select } from '../components/Input'
 import BulkUploadModal from '../components/BulkUploadModal'
 import useAuth from '../hooks/useAuth'
-import api from '../api/index'
+import useMart from '../hooks/useMart'
+import MartSelector from '../components/MartSelector'
+import { fetchMarts } from '../store/slices/martSlice'
 import AlgoliaProductSearch from '../components/AlgoliaProductSearch'
+import api from '../api/index'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -100,12 +105,13 @@ const EMPTY_FORM = {
     type: 'restock', expiry_date: '', batch_number: '', aisle_location: '', is_active: true,
 }
 
-const EMPTY_RESTOCK_FORM = { stock_qty: '', mode: 'add', txn_type: 'restock', reason: '' }
+const EMPTY_RESTOCK_FORM = { stock_qty: '', mode: 'add', txn_type: 'restock', reason: '', batch_number: '' }
 
 // These are the "committed" filters — what was last sent to the backend.
 // The FilterBar maintains its own draft internally.
 const EMPTY_FILTERS = {
     search: '',
+    product_id: '',
     stock_unit: '',
     is_active: '',
     low_stock_only: '',
@@ -209,28 +215,94 @@ function getActiveChips(f) {
 function FilterBar({ committedFilters, onSearch, onReset, loading, martId }) {
     const [draft, setDraft] = useState(committedFilters)
     const [expanded, setExpanded] = useState(false)
+    const [inputValue, setInputValue] = useState(committedFilters.search || '')
+    const [suggestions, setSuggestions] = useState([])
+    const [suggestLoading, setSuggestLoading] = useState(false)
+    const [showSuggest, setShowSuggest] = useState(false)
+    const suggestRef = useRef(null)
 
-    // Sync draft when parent resets
-    useEffect(() => { setDraft(committedFilters) }, [committedFilters])
-
-    // Debounced search on typing
+    // Sync draft and inputValue when parent resets
     useEffect(() => {
-        const timer = setTimeout(() => {
-            onSearch({ ...draft, page: 1 })
-        }, 300)
+        setDraft(committedFilters)
+        setInputValue(committedFilters.search || '')
+    }, [committedFilters])
+
+    // Debounced autocomplete suggestions on typing
+    useEffect(() => {
+        const q = inputValue.trim()
+        if (!q || q.length < 2 || q === (committedFilters.search || '').trim()) {
+            setSuggestions([])
+            if (q === (committedFilters.search || '').trim()) {
+                setShowSuggest(false)
+            }
+            return
+        }
+
+        const timer = setTimeout(async () => {
+            setSuggestLoading(true)
+            try {
+                const res = await api.get(`/products/autocomplete?q=${encodeURIComponent(q)}`)
+                if (res.success) {
+                    setSuggestions(res.data?.suggestions || [])
+                    setShowSuggest(true)
+                }
+            } catch (err) {
+                console.error('[Autocomplete] Failed:', err)
+            } finally {
+                setSuggestLoading(false)
+            }
+        }, 450)
+
         return () => clearTimeout(timer)
-    }, [draft.search])
+    }, [inputValue, committedFilters.search])
+
+    // Close suggestions on click outside
+    useEffect(() => {
+        const clickOut = (e) => {
+            if (suggestRef.current && !suggestRef.current.contains(e.target)) {
+                setShowSuggest(false)
+            }
+        }
+        document.addEventListener('mousedown', clickOut)
+        return () => document.removeEventListener('mousedown', clickOut)
+    }, [])
 
     const set = (k, v) => setDraft(f => ({ ...f, [k]: v }))
 
-    const commit = () => {
-        onSearch({ ...draft, page: 1 })
+    const commit = async () => {
+        let finalProductId = draft.product_id || ''
+        let q = inputValue
+        if (q && q.trim() && !finalProductId) {
+            // Option A: Resolve text query by calling autocomplete API to find top suggestion's ID
+            try {
+                const res = await api.get(`/products/autocomplete?q=${encodeURIComponent(q.trim())}`)
+                if (res.success && res.data?.suggestions?.length > 0) {
+                    const topSuggest = res.data.suggestions[0]
+                    finalProductId = topSuggest.product_id || ''
+                    setInputValue(topSuggest.name)
+                    q = topSuggest.name
+                }
+            } catch (err) {
+                console.error('[Resolve search ID] Failed:', err)
+            }
+        }
+        onSearch({ ...draft, search: q, product_id: finalProductId, page: 1 })
+        setShowSuggest(false)
     }
     const reset = () => {
         setDraft(EMPTY_FILTERS)
+        setInputValue('')
         onReset()
     }
     const onEnter = e => { if (e.key === 'Enter') commit() }
+
+    const handleSelectSuggest = (s) => {
+        const term = s.name
+        setInputValue(term)
+        setDraft(d => ({ ...d, product_id: s.product_id }))
+        onSearch({ ...draft, search: term, product_id: s.product_id, page: 1 })
+        setShowSuggest(false)
+    }
 
     const chips = getActiveChips(committedFilters) // from committed, not draft
     const statusVal = getStockStatusValue(draft)
@@ -245,21 +317,73 @@ function FilterBar({ committedFilters, onSearch, onReset, loading, martId }) {
     }))
 
     return (
-        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
 
             {/* Top bar */}
             <div className="flex gap-2 p-3">
-                <div className="relative flex-1 min-w-0">
+                <div className="relative flex-1 min-w-0" ref={suggestRef}>
                     <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                     </svg>
                     <input
-                        value={draft.search}
-                        onChange={e => set('search', e.target.value)}
+                        value={inputValue}
+                        onChange={e => {
+                            setInputValue(e.target.value)
+                            setDraft(d => ({ ...d, product_id: '' })) // Clear selected product ID if user types manually
+                            setShowSuggest(true)
+                        }}
                         onKeyDown={onEnter}
+                        onFocus={() => suggestions.length > 0 && setShowSuggest(true)}
                         placeholder="Search product, variant, batch, aisle…"
-                        className="w-full text-xs pl-8 pr-3 py-2.5 border border-gray-200 rounded-xl focus:ring-4 focus:ring-green-500/10 focus:border-green-500 focus:outline-none transition-all bg-gray-50 focus:bg-white placeholder-gray-400"
+                        className="w-full text-xs pl-8 pr-8 py-2.5 border border-gray-200 rounded-xl focus:ring-4 focus:ring-green-500/10 focus:border-green-500 focus:outline-none transition-all bg-gray-50 focus:bg-white placeholder-gray-400"
                     />
+                    {suggestLoading && (
+                        <div className="absolute right-8 top-1/2 -translate-y-1/2">
+                            <div className="w-3 h-3 border-2 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
+                        </div>
+                    )}
+                    {inputValue && (
+                        <button
+                            onClick={() => {
+                                setInputValue('')
+                                setDraft(d => ({ ...d, search: '', product_id: '' }))
+                                onSearch({ ...draft, search: '', product_id: '', page: 1 })
+                            }}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 hover:text-rose-500 font-bold"
+                        >
+                            ✕
+                        </button>
+                    )}
+
+                    {/* Autocomplete Dropdown */}
+                    {showSuggest && inputValue?.length >= 2 && (
+                        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-gray-100 rounded-xl shadow-xl max-h-60 overflow-y-auto">
+                            {suggestions.length > 0 ? (
+                                suggestions.map((s, i) => (
+                                    <button
+                                        key={i}
+                                        onMouseDown={e => {
+                                            e.preventDefault()
+                                            handleSelectSuggest(s)
+                                        }}
+                                        className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-primary-50 border-b border-gray-50 last:border-none flex items-center justify-between transition-colors"
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <span className="text-sm">{s.is_brand ? '🏷️' : '🔍'}</span>
+                                            <span className="font-semibold truncate max-w-[150px] sm:max-w-[200px]">{s.name}</span>
+                                        </div>
+                                        {s.is_brand ? (
+                                            <span className="text-[9px] font-extrabold text-primary-600 bg-primary-50 px-2 py-0.5 rounded-full uppercase tracking-wider">Brand</span>
+                                        ) : s.brand && (
+                                            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{s.brand}</span>
+                                        )}
+                                    </button>
+                                ))
+                            ) : !suggestLoading ? (
+                                <div className="px-4 py-3 text-xs text-gray-400 italic">No products matched search</div>
+                            ) : null}
+                        </div>
+                    )}
                 </div>
 
                 {/* Sort — desktop */}
@@ -515,7 +639,10 @@ function RestockModal({ open, onClose, item, martId }) {
     const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
     const currentQty = parseFloat(item.stock_qty)
     const inputQty = parseFloat(form.stock_qty) || 0
-    const projected = form.mode === 'add' ? currentQty + inputQty : inputQty
+    const isSubtractive = ['return', 'damage', 'expired', 'theft', 'transfer', 'sale'].includes(form.txn_type)
+    const projected = form.mode === 'add'
+        ? (isSubtractive ? currentQty - inputQty : currentQty + inputQty)
+        : inputQty
     const isNeg = projected < 0
 
     const handleSubmit = async () => {
@@ -529,8 +656,8 @@ function RestockModal({ open, onClose, item, martId }) {
             dispatch(showToast({ message: `Result would be negative (${projected})`, type: 'error' })); return
         }
         const action = await dispatch(restockInventoryItem({
-            mongo_product_id: item.mongo_product_id,
-            mongo_mart_id: martId,
+            product_id: item.product_id,
+            martId: martId,
             variant_id: item.variant_id,
             sale_price: parseFloat(item.sale_price),
             mrp: parseFloat(item.mrp),
@@ -539,7 +666,7 @@ function RestockModal({ open, onClose, item, martId }) {
             low_stock_alert: parseFloat(item.low_stock_alert),
             aisle_location: item.aisle_location || null,
             expiry_date: item.expiry_date || null,
-            batch_number: item.batch_number || null,
+            batch_number: form.batch_number || null,
             mode: form.mode,
             txn_type: form.txn_type,
             type: item.type,
@@ -549,7 +676,7 @@ function RestockModal({ open, onClose, item, martId }) {
     }
 
     return (
-        <Modal title={`Restock — ${item.product_name || 'Stock Product'} [${item.product_code || item.mongo_product_id} / ${item.variant_code || item.variant_id}]`}
+        <Modal title={`Restock — ${item.product_name || 'Stock Product'} [${item.product_code || item.product_id} / ${item.variant_code || item.variant_id}]`}
             open={open} onClose={onClose} size="md"
             footer={<><Button variant="secondary" onClick={onClose}>Cancel</Button><Button variant="primary" loading={restocking} onClick={handleSubmit}>Update Stock</Button></>}>
             <div className="space-y-5">
@@ -579,6 +706,10 @@ function RestockModal({ open, onClose, item, martId }) {
                         {USER_TXN_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                     </Select>
                 </div>
+                <div className="grid grid-cols-2 gap-4">
+                    <Input label="Batch Number / ID"
+                        value={form.batch_number} onChange={e => set('batch_number', e.target.value)} placeholder="e.g. BATCH-001 (Optional)" />
+                </div>
                 <div className={`rounded-lg px-4 py-3 border ${isNeg ? 'bg-red-50 border-red-200' : 'bg-green-50 border-green-200'}`}>
                     <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Projected Stock</p>
                     <p className={`text-lg font-bold ${isNeg ? 'text-red-600' : 'text-green-700'}`}>
@@ -598,6 +729,7 @@ const TXN_TYPES_ALL = ['restock', 'sale', 'return', 'damage', 'expired', 'theft'
 const EMPTY_TXN_FILTERS = { type: '', from: '', to: '', page: 1, limit: 50 }
 
 function HistoryModal({ open, onClose, item }) {
+    const dispatch = useDispatch()
     const [filters, setFilters] = useState(EMPTY_TXN_FILTERS)
     const [loading, setLoading] = useState(false)
     const [txns, setTxns] = useState([])
@@ -611,14 +743,18 @@ function HistoryModal({ open, onClose, item }) {
 
     useEffect(() => {
         if (!open || !item?.id) return
-        const params = new URLSearchParams({ limit: filters.limit, page: filters.page })
-        if (filters.type) params.set('type', filters.type)
-        if (filters.from) params.set('from', filters.from)
-        if (filters.to) params.set('to', filters.to)
 
         setLoading(true)
         setError(null)
-        api.get(`/inventory/${item.id}/transactions?${params}`)
+        dispatch(fetchItemTransactionsFiltered({
+            id: item.id,
+            limit: filters.limit,
+            page: filters.page,
+            type: filters.type,
+            from: filters.from,
+            to: filters.to
+        }))
+            .unwrap()
             .then(res => {
                 if (res.success) {
                     setTxns(res.data || [])
@@ -629,7 +765,7 @@ function HistoryModal({ open, onClose, item }) {
             })
             .catch(err => setError(err?.message || 'Network error'))
             .finally(() => setLoading(false))
-    }, [open, item?.id, filters])
+    }, [open, item?.id, filters, dispatch])
 
     if (!item) return null
 
@@ -640,7 +776,7 @@ function HistoryModal({ open, onClose, item }) {
     const net = txns.reduce((s, t) => s + parseFloat(t.qty_change || 0), 0)
 
     return (
-        <Modal title={`Stock History — ${item.product_name || 'Stock Product'} [${item.product_code || item.mongo_product_id} / ${item.variant_code || item.variant_id}]`}
+        <Modal title={`Stock History — ${item.product_name || 'Stock Product'} [${item.product_code || item.product_id} / ${item.variant_code || item.variant_id}]`}
             open={open} onClose={onClose} size="xl"
             footer={<Button variant="secondary" onClick={onClose}>Close</Button>}>
 
@@ -755,7 +891,12 @@ function HistoryModal({ open, onClose, item }) {
 
 export default function Inventory() {
     const dispatch = useDispatch()
-    const { martId, staffId } = useAuth()
+    const { staffId } = useAuth()
+    const { activeMartId: martId, selectorProps } = useMart()
+
+    useEffect(() => {
+        dispatch(fetchMarts())
+    }, [dispatch])
 
     const items = useSelector(selectInventoryItems)
     const localStats = useSelector(selectInventoryStats)
@@ -841,60 +982,80 @@ export default function Inventory() {
     const [batchSearch, setBatchSearch] = useState('')
     const [batchFilter, setBatchFilter] = useState('expiring_soon') // 'all' | 'expiring_soon' | 'expired' | 'low_stock'
 
+    // ── Client-side filter/sort — same pattern as warehouse InventoryManager ──
+    // allMartBatches: full list loaded once from Redis-cached API
+    // sortedMartBatches: pure JS filter+sort — no API call on search/pill change
+    const [allMartBatches, setAllMartBatches] = useState([])
+
     const sortedMartBatches = useMemo(() => {
-        return [...martBatches].sort((a, b) => {
-            const aExpired = checkIsExpired(a.expiry_date);
-            const bExpired = checkIsExpired(b.expiry_date);
-            if (aExpired && !bExpired) return -1;
-            if (!aExpired && bExpired) return 1;
-            if (aExpired && bExpired) {
+        const q = batchSearch.toLowerCase().trim();
+        const now = new Date();
+        const in60 = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
+
+        return allMartBatches
+            .filter(r => {
+                // ── Search filter ──
+                if (q) {
+                    const hit = [
+                        r.product_name, r.product_code, r.batch_number,
+                        r.variant_code, r.variant_name, r.sku, r.aisle_location
+                    ].some(v => (v || '').toLowerCase().includes(q));
+                    if (!hit) return false;
+                }
+                // ── Pill filter ──
+                if (batchFilter === 'expiring_soon') {
+                    const d = r.expiry_date ? new Date(r.expiry_date) : null;
+                    return d && d >= now && d <= in60;
+                }
+                if (batchFilter === 'expired') {
+                    const d = r.expiry_date ? new Date(r.expiry_date) : null;
+                    return d && d < now;
+                }
+                if (batchFilter === 'low_stock') {
+                    return parseFloat(r.stock_qty) > 0 && parseFloat(r.stock_qty) <= parseFloat(r.low_stock_alert || 10);
+                }
+                return true; // 'all'
+            })
+            .sort((a, b) => {
+                const aExpired = checkIsExpired(a.expiry_date);
+                const bExpired = checkIsExpired(b.expiry_date);
+                if (aExpired && !bExpired) return -1;
+                if (!aExpired && bExpired) return 1;
+                if (aExpired && bExpired) {
+                    if (a.expiry_date && b.expiry_date) return new Date(a.expiry_date) - new Date(b.expiry_date);
+                    if (a.expiry_date) return -1;
+                    if (b.expiry_date) return 1;
+                }
+
+                const aExpiring = checkIsExpiringSoon(a.expiry_date);
+                const bExpiring = checkIsExpiringSoon(b.expiry_date);
+                if (aExpiring && !bExpiring) return -1;
+                if (!aExpiring && bExpiring) return 1;
+                if (aExpiring && bExpiring) {
+                    if (a.expiry_date && b.expiry_date) return new Date(a.expiry_date) - new Date(b.expiry_date);
+                    if (a.expiry_date) return -1;
+                    if (b.expiry_date) return 1;
+                }
+
                 if (a.expiry_date && b.expiry_date) return new Date(a.expiry_date) - new Date(b.expiry_date);
                 if (a.expiry_date) return -1;
                 if (b.expiry_date) return 1;
-            }
 
-            const aExpiring = checkIsExpiringSoon(a.expiry_date);
-            const bExpiring = checkIsExpiringSoon(b.expiry_date);
-            if (aExpiring && !bExpiring) return -1;
-            if (!aExpiring && bExpiring) return 1;
-            if (aExpiring && bExpiring) {
-                if (a.expiry_date && b.expiry_date) return new Date(a.expiry_date) - new Date(b.expiry_date);
-                if (a.expiry_date) return -1;
-                if (b.expiry_date) return 1;
-            }
+                return 0;
+            });
+    }, [allMartBatches, batchSearch, batchFilter]);
 
-            if (a.expiry_date && b.expiry_date) return new Date(a.expiry_date) - new Date(b.expiry_date);
-            if (a.expiry_date) return -1;
-            if (b.expiry_date) return 1;
-
-            return 0;
-        });
-    }, [martBatches]);
-
-    // Fetch batches when batch tab is active, batchSearch changes (debounced), or batchFilter changes
     useEffect(() => {
         if (!martId || activeTab !== 'batches') return
-
-        const doFetch = () => {
-            setMartBatchesLoading(true)
-            const queryParams = new URLSearchParams({ martId })
-            if (batchSearch.trim()) queryParams.set('search', batchSearch.trim())
-            if (batchFilter === 'expiring_soon') queryParams.set('expiring_soon', 'true')
-            if (batchFilter === 'expired') queryParams.set('expired', 'true')
-            if (batchFilter === 'low_stock') queryParams.set('low_stock_only', 'true')
-
-            api.get(`/inventory/batches?${queryParams.toString()}`)
-                .then(res => {
-                    if (res.success) setMartBatches(res.data || [])
-                    else setMartBatches([])
-                })
-                .catch(err => { console.error('Failed to fetch batches:', err); setMartBatches([]) })
-                .finally(() => setMartBatchesLoading(false))
-        }
-
-        const delay = setTimeout(doFetch, batchSearch ? 400 : 0)
-        return () => clearTimeout(delay)
-    }, [martId, activeTab, batchSearch, batchFilter])
+        setMartBatchesLoading(true)
+        dispatch(fetchMartBatches(martId))
+            .unwrap()
+            .then(data => {
+                setAllMartBatches(data)
+            })
+            .catch(err => { console.error('Failed to fetch batches:', err); setAllMartBatches([]) })
+            .finally(() => setMartBatchesLoading(false))
+    }, [martId, activeTab, dispatch])
 
     const batchColumns = [
         {
@@ -934,14 +1095,20 @@ export default function Inventory() {
             key: 'stock', label: 'Available',
             render: r => <span className="font-bold text-gray-800 text-xs">{parseFloat(r.stock_qty).toLocaleString()} <span className="text-[9px] text-gray-500 uppercase">pcs</span></span>,
         },
+
         {
             key: 'expiry', label: 'Expiry',
             render: r => {
                 if (!r.expiry_date) return <span className="text-gray-400 text-xs">—</span>
                 const d = new Date(r.expiry_date)
                 const diff = Math.ceil((d - new Date()) / (1000 * 60 * 60 * 24))
-                const color = diff < 0 ? 'text-rose-700 font-black' : diff <= 60 ? 'text-orange-600 font-bold' : 'text-gray-700'
-                return <span className={`text-xs ${color}`}>{d.toLocaleDateString('en-GB')}{diff <= 60 && <span className="ml-1 text-[9px]">{diff < 0 ? '🚨 EXP' : `🚨 ${diff}d`}</span>}</span>
+                // Adapt to parent row bg: expired row is dark red (need white/light text), expiring soon is orange
+                const color = diff < 0
+                    ? 'text-red-200 font-black'
+                    : diff <= 60
+                        ? 'text-orange-700 font-bold'
+                        : 'text-gray-700'
+                return <span className={`text-xs ${color}`}>{d.toLocaleDateString('en-GB')}{diff <= 60 && <span className="ml-1 text-[9px]">{diff < 0 ? '🚨 EXP' : `⏳ ${diff}d`}</span>}</span>
             },
         },
         {
@@ -993,8 +1160,8 @@ export default function Inventory() {
         if (parseFloat(form.sale_price) > parseFloat(form.mrp)) { dispatch(showToast({ message: 'Sale price cannot exceed MRP', type: 'error' })); return }
 
         const action = await dispatch(addInventoryItem({
-            mongo_product_id: form.product_id, variant_id: form.variant_id,
-            mongo_mart_id: martId, mongo_staff_id: staffId,
+            product_id: form.product_id, variant_id: form.variant_id,
+            martId: martId,
             sale_price: parseFloat(form.sale_price), mrp: parseFloat(form.mrp),
             stock_qty: parseFloat(form.stock_qty), stock_unit: form.stock_unit,
             low_stock_alert: parseFloat(form.low_stock_alert), type: form.type,
@@ -1021,23 +1188,11 @@ export default function Inventory() {
         {
             key: 'details', label: 'Product & Variant Details',
             render: r => (
-                <div className="space-y-0.5">
-                    <p className="font-bold text-gray-900 leading-tight text-xs">{r.variant_name || 'Unknown Variant'}</p>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="bg-blue-50 text-blue-700 text-[9px] font-extrabold px-1.5 py-0.5 rounded border border-blue-100 uppercase font-mono">
-                            Var: {r.variant_code || 'default'}
-                        </span>
-                        {r.display_size && (
-                            <span className="bg-violet-50 text-violet-700 text-[9px] font-bold px-1.5 py-0.5 rounded border border-violet-100 uppercase">
-                                {r.display_size}
-                            </span>
-                        )}
-                        {(r.stock_unit || r.unit_type) && (
-                            <span className="bg-teal-50 text-teal-700 text-[9px] font-bold px-1.5 py-0.5 rounded border border-teal-100 uppercase">
-                                {r.stock_unit || r.unit_type}
-                            </span>
-                        )}
-                    </div>
+                <div>
+                    <p className="font-bold text-gray-900 leading-tight text-xs">{r.variant_name || r.product_name || '—'}</p>
+                    {r.display_size && (
+                        <div className="text-[10px] text-slate-400 font-bold mt-0.5">{r.display_size}</div>
+                    )}
                 </div>
             )
         },
@@ -1070,14 +1225,29 @@ export default function Inventory() {
 
         {
             key: 'stock', label: 'Inventory',
-            render: r => {
+            // Row-level expiry styling takes priority — don't double-color the cell
+            className: r => {
+                const isExpired = checkIsExpired(r.expiry_date);
+                const isExpiring = checkIsExpiringSoon(r.expiry_date);
+                if (isExpired || isExpiring) return ''; // Row bg already handles it
                 const isLow = parseFloat(r.stock_qty) <= parseFloat(r.low_stock_alert)
+                return isLow ? 'bg-red-50 text-red-600 font-semibold' : ''
+            },
+            render: r => {
+                const isExpired = checkIsExpired(r.expiry_date);
+                const isExpiring = checkIsExpiringSoon(r.expiry_date);
+                const isLow = parseFloat(r.stock_qty) <= parseFloat(r.low_stock_alert)
+                const qtyColor = isExpired
+                    ? 'text-red-200 font-bold'
+                    : isExpiring
+                        ? 'text-orange-800 font-bold'
+                        : isLow ? 'text-red-600 font-bold' : 'text-gray-800 font-bold'
                 return (
                     <div className="flex items-center gap-3 text-[11px]">
                         <div className="flex items-center gap-1">
                             <span className="text-gray-400 font-bold text-[9px] uppercase">Qty:</span>
-                            <span className={`font-bold ${isLow ? 'text-red-600' : 'text-gray-800'}`}>
-                                {parseFloat(r.stock_qty).toLocaleString()}<span className="ml-0.5 text-[9px] uppercase text-gray-500">{r.stock_unit || r.unit_type || 'pcs'}</span>
+                            <span className={qtyColor}>
+                                {parseFloat(r.stock_qty).toLocaleString()}<span className="ml-0.5 text-[9px] uppercase opacity-70">pcs</span>
                             </span>
                         </div>
                         <div className="flex items-center gap-1">
@@ -1154,10 +1324,13 @@ export default function Inventory() {
                 title="Inventory"
                 subtitle="Manage stock, prices, and availability for your mart"
                 action={
-                    <div className="flex gap-2">
-                        <Button variant="secondary" onClick={() => setBulkOpen(true)} >📤 Bulk Upload</Button>
-                        <Button variant="secondary" onClick={handleRefresh} disabled={!martId}>↻ Refresh</Button>
-                        <Button variant="primary" onClick={() => { setForm(EMPTY_FORM); setAddOpen(true) }} >+ Add Item</Button>
+                    <div className="flex items-center gap-4">
+                        <MartSelector {...selectorProps} />
+                        <div className="flex gap-2">
+                            <Button variant="secondary" onClick={() => setBulkOpen(true)} >📤 Bulk Upload</Button>
+                            <Button variant="secondary" onClick={handleRefresh} disabled={!martId}>↻ Refresh</Button>
+                            <Button variant="primary" onClick={() => { setForm(EMPTY_FORM); setAddOpen(true) }} >+ Add Item</Button>
+                        </div>
                     </div>
                 }
             />
@@ -1167,21 +1340,19 @@ export default function Inventory() {
                 <div className="flex bg-gray-100 p-1 rounded-xl w-fit border border-gray-200">
                     <button
                         onClick={() => setActiveTab('inventory')}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all duration-200 ${
-                            activeTab === 'inventory'
-                                ? 'bg-white text-gray-800 shadow-sm'
-                                : 'text-gray-500 hover:text-gray-700'
-                        }`}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all duration-200 ${activeTab === 'inventory'
+                            ? 'bg-white text-gray-800 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                            }`}
                     >
                         🎒 Shelf Inventory
                     </button>
                     <button
                         onClick={() => setActiveTab('batches')}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all duration-200 ${
-                            activeTab === 'batches'
-                                ? 'bg-white text-gray-800 shadow-sm'
-                                : 'text-gray-500 hover:text-gray-700'
-                        }`}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all duration-200 ${activeTab === 'batches'
+                            ? 'bg-white text-gray-800 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                            }`}
                     >
                         📦 Supplier Batch Tracking
                     </button>
@@ -1262,24 +1433,23 @@ export default function Inventory() {
                             <div className="flex items-center gap-2 flex-wrap">
                                 {[
                                     { id: 'expiring_soon', label: 'Expiring Soon', emoji: '⏳' },
-                                    { id: 'all',           label: 'All Batches',   emoji: '📦' },
-                                    { id: 'expired',       label: 'Expired',       emoji: '🚫' },
-                                    { id: 'low_stock',     label: 'Low Stock',     emoji: '⚠️' },
+                                    { id: 'all', label: 'All Batches', emoji: '📦' },
+                                    { id: 'expired', label: 'Expired', emoji: '🚫' },
+                                    { id: 'low_stock', label: 'Low Stock', emoji: '⚠️' },
                                 ].map(f => (
                                     <button
                                         key={f.id}
                                         onClick={() => setBatchFilter(f.id)}
-                                        className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold border transition-all duration-150 whitespace-nowrap ${
-                                            batchFilter === f.id
-                                                ? f.id === 'expiring_soon'
-                                                    ? 'bg-orange-500 border-orange-500 text-white shadow-sm'
-                                                    : f.id === 'expired'
-                                                        ? 'bg-rose-600 border-rose-600 text-white shadow-sm'
-                                                        : f.id === 'low_stock'
-                                                            ? 'bg-rose-500 border-rose-500 text-white shadow-sm'
-                                                            : 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
-                                                : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'
-                                        }`}
+                                        className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold border transition-all duration-150 whitespace-nowrap ${batchFilter === f.id
+                                            ? f.id === 'expiring_soon'
+                                                ? 'bg-orange-500 border-orange-500 text-white shadow-sm'
+                                                : f.id === 'expired'
+                                                    ? 'bg-rose-600 border-rose-600 text-white shadow-sm'
+                                                    : f.id === 'low_stock'
+                                                        ? 'bg-rose-500 border-rose-500 text-white shadow-sm'
+                                                        : 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                                            : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'
+                                            }`}
                                     >
                                         {f.emoji} {f.label}
                                         {martBatchesLoading && batchFilter === f.id && (
@@ -1323,12 +1493,13 @@ export default function Inventory() {
                         data={sortedMartBatches}
                         loading={martBatchesLoading}
                         emptyText="No product batches found matching search criteria."
-                        pagination={false}
+                        pagination={true}
+                        pageSize={25}
                         showSearch={false}
                         rowClassName={row => {
                             const isExpired = checkIsExpired(row.expiry_date);
                             const isExpiring = checkIsExpiringSoon(row.expiry_date);
-                            const isLow = parseFloat(row.stock_qty || 0) > 0 && parseFloat(row.stock_qty || 0) <= parseFloat(row.low_stock_alert || 10);
+                            const isLow = parseFloat(row.stock_qty) > 0 && parseFloat(row.stock_qty) <= parseFloat(row.low_stock_alert || 10);
                             if (isExpired) return 'bg-red-900 text-white font-semibold border-l-4 border-red-600';
                             if (isExpiring) return 'bg-orange-50 text-orange-950 border-l-4 border-orange-500 font-medium';
                             if (isLow) return 'bg-red-50 text-red-900 border-l-4 border-red-500 font-semibold';
@@ -1342,12 +1513,17 @@ export default function Inventory() {
                     data={sortedFilteredItems}
                     loading={filteredLoad}
                     emptyText="No inventory items match your filters."
-                    pagination={false}
+                    pagination={true}
                     showSearch={false}
+                    totalItems={pagination?.total || 0}
+                    page={committedFilters.page}
+                    pageSize={committedFilters.limit || 25}
+                    onPageChange={handlePageChange}
+                    onPageSizeChange={(sz) => setCommittedFilters(prev => ({ ...prev, page: 1, limit: sz }))}
                     rowClassName={row => {
                         const isExpired = checkIsExpired(row.expiry_date);
                         const isExpiring = checkIsExpiringSoon(row.expiry_date);
-                        const isLow = parseFloat(row.stock_qty || 0) <= parseFloat(row.low_stock_alert || 0);
+                        const isLow = parseFloat(row.stock_qty) <= parseFloat(row.low_stock_alert);
                         if (isExpired) return 'bg-red-900 text-white font-semibold border-l-4 border-red-600';
                         if (isExpiring) return 'bg-orange-50 text-orange-950 border-l-4 border-orange-500 font-medium';
                         if (isLow) return 'bg-red-50 text-red-900 border-l-4 border-red-500 font-semibold';
@@ -1355,9 +1531,6 @@ export default function Inventory() {
                     }}
                 />
             )}
-
-            {/* Pagination */}
-            {martId && activeTab === 'inventory' && <PaginationBar pagination={pagination} onPageChange={handlePageChange} />}
 
             {/* Add Modal */}
             <Modal title="Add Inventory Item" open={addOpen} onClose={() => setAddOpen(false)} size="lg"

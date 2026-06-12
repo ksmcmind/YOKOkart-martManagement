@@ -206,6 +206,38 @@ export const fetchItemTransactions = createAsyncThunk(
     }
 )
 
+export const fetchItemTransactionsFiltered = createAsyncThunk(
+    'inventory/fetchItemTransactionsFiltered',
+    async ({ id, type, from, to, page = 1, limit = 50 }, { rejectWithValue }) => {
+        if (!id) return rejectWithValue('id required')
+        try {
+            const params = new URLSearchParams({ limit, page })
+            if (type) params.set('type', type)
+            if (from) params.set('from', from)
+            if (to) params.set('to', to)
+            const res = await api.get(`/inventory/${id}/transactions?${params.toString()}`)
+            if (!res.success) return rejectWithValue(res.message)
+            return res
+        } catch (err) {
+            return rejectWithValue(err?.message || 'Network error')
+        }
+    }
+)
+
+export const fetchMartBatches = createAsyncThunk(
+    'inventory/fetchMartBatches',
+    async (martId, { rejectWithValue }) => {
+        if (!martId) return rejectWithValue('martId required')
+        try {
+            const res = await api.get(`/inventory/batches?martId=${martId}`)
+            if (!res.success) return rejectWithValue(res.message)
+            return res.data || []
+        } catch (err) {
+            return rejectWithValue(err?.message || 'Network error')
+        }
+    }
+)
+
 export const fetchMartTransactions = createAsyncThunk(
     'inventory/fetchMartTransactions',
     async (args = {}, { rejectWithValue }) => {
@@ -447,7 +479,8 @@ export const selectFilteredInventory = createSelector(
         if (!search) return items
         const q = search.toLowerCase()
         return items.filter(it =>
-            it.mongo_product_id?.toLowerCase().includes(q) ||
+            it.product_id?.toLowerCase().includes(q) ||
+            it.product_code?.toLowerCase().includes(q) ||
             it.variant_id?.toLowerCase().includes(q) ||
             it.aisle_location?.toLowerCase().includes(q)
         )

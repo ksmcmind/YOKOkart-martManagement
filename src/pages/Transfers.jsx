@@ -550,8 +550,8 @@ export default function Transfers() {
                   qtyRequested: '',
                   notes: ''
                 });
-                setProductSearchText('');
-                setSelectedProduct(null);
+                setSelectedProductLabel('');
+                setSelectedProductVariants([]);
                 setRequestOpen(true);
               }}>+ Request Stock</Button>
             ) : (

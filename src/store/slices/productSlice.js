@@ -30,7 +30,7 @@ export const fetchProducts = createAsyncThunk(
 
       const res = await api.get(`/products?${qs.toString()}`)
       if (!res.success) return rejectWithValue(res.message || 'Failed to load products')
-      return res.data
+      return { products: res.data || [], pagination: res.pagination }
     } catch (err) {
       return rejectWithValue(err?.message || 'Network error')
     }
