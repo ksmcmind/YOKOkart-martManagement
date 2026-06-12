@@ -15,9 +15,10 @@ import { showToast } from './uiSlice'
 
 export const fetchProducts = createAsyncThunk(
   'product/fetchAll',
-  async ({ categorySlug = null, subcategorySlug = null, search = '', code = '', brand = '', isActive = '', isVeg = '', page = 1, limit = 50 } = {}, { rejectWithValue }) => {
+  async ({ martId = null, categorySlug = null, subcategorySlug = null, search = '', code = '', brand = '', isActive = '', isVeg = '', page = 1, limit = 50 } = {}, { rejectWithValue }) => {
     try {
       const qs = new URLSearchParams()
+      if (martId) qs.set('martId', martId)
       if (categorySlug) qs.set('categorySlug', categorySlug)
       if (subcategorySlug) qs.set('subcategorySlug', subcategorySlug)
       if (search) qs.set('search', search)
